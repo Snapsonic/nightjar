@@ -1,0 +1,74 @@
+---
+title: "Architecture"
+description: "Node internals, data flow, the security model, and what is roadmap vs shipped."
+icon: "diagram-project"
+---
+
+```
+┌─ your network ──────────────────────────┐      ┌─ cloud (optional) ─────────────┐
+│  RTSP cams ─► go2rtc ─► WebRTC live     │      │  app.nightjar.ca (Next.js)     │
+│                 │                        │      │  Supabase: auth · Postgres ·   │
+│  ffmpeg ──► fMP4 segments on your disk  │◄────►│  Realtime (signaling/commands) │
+│  motion ─► onnx detect ─► event clips ──┼─────►│  Storage (event clips only)    │
+│  nightjar-node (TypeScript)             │      │                                │
+└─────────────────────────────────────────┘      └────────────────────────────────┘
+```
+
+## Repository layout
+
+| Path | What it is |
+| --- | --- |
+| `apps/node` | The self-hosted NVR service |
+| `apps/web` | The cloud dashboard at app.nightjar.ca |
+| `apps/marketing` | nightjar.ca |
+| `packages/shared` | Zod schemas and the realtime signaling protocol — the contract between everything |
+| `packages/db` | Generated Supabase types and typed clients |
+| `supabase/` | Migrations and edge functions (pairing, tokens, TURN credentials, signed uploads) |
+
+## Node modules
+
+The node is a TypeScript service (run with `tsx`, no build step) that wires these modules together:
+
+| Module | What it does |
+| --- | --- |
+| `config/store` | `config.json` with atomic writes and change events — other modules reconcile live against config changes |
+| `config/identity` | `identity.json`: machine secret (first boot), node id and claim code (after registration) |
+| `cameras/manager` | Camera CRUD plus ffprobe capability probing |
+| `go2rtc/supervisor` | Renders `go2rtc.yaml` from the camera list, triggers restarts, health and stream checks |
+| `recorder/recorder` | One ffmpeg per camera copying the main stream into 60 s fMP4 segments; SQLite segment index; retention pruner; range export for clips |
+| `motion/detector` | One ffmpeg per camera decoding the substream to 5 fps grayscale frames; rolling-background frame diff; motion start/end events |
+| `detect/worker` | Worker thread running YOLOX-tiny via onnxruntime-node on go2rtc JPEG snapshots |
+| `events/pipeline` | Motion → event → clip + thumbnail → local row → serial, offline-safe upload queue |
+| `cloud/link` | Register → claim poll → session: node JWT, private realtime channel, heartbeat, camera sync |
+| `api/server` | Local REST API, WHEP proxy, static UI (Fastify) |
+| `db` | SQLite: segments, events mirror, upload queue |
+
+## Data flow for one event
+
+1. The motion detector sees 2 consecutive changed frames on a camera's substream and emits `motionStart`.
+2. The pipeline opens a candidate event and fetches a full-color snapshot from go2rtc; the detect worker runs YOLOX-tiny and may upgrade the event from `motion` to `person`/`vehicle`/`animal`/`package`. A second pass runs 10 s in.
+3. Motion ends after 10 s of quiet. The pipeline waits for post-roll footage to land on disk, cuts a clip (start −5 s to end +5 s) from the recorder's segments with stream copy, and extracts a mid-clip thumbnail.
+4. The event is written to local SQLite and, if the node is paired, an upload job is enqueued. A serial uploader pushes the event row, then the clip and thumbnail via signed URLs, then the clip metadata row — idempotently, with retries and backoff. Offline, jobs wait.
+
+## Security model
+
+- **Machine identity, not user identity.** The node generates a secret on first boot and registers it with an edge function, which creates a dedicated machine auth user. The node exchanges `nodeId + secret` for a short-lived node-scoped JWT (refreshed before expiry). Your user credentials never touch the node.
+- **Row-level security.** Postgres RLS restricts the node's JWT to its own rows: its node record, its cameras, its events and clips. Users, in turn, can only see nodes they have claimed.
+- **Private realtime channels.** Signaling runs on a `node:{nodeId}` channel marked private — only the node and the claiming user's sessions can join. It carries WHEP offers/answers, snapshot requests, and status requests.
+- **Storage path scoping.** Uploads go to node-scoped storage paths using signed upload URLs minted by an edge function; the node cannot write outside its own prefix. Snapshots are shared back as short-lived signed URLs.
+- **Credentials stay home.** Camera RTSP URLs (which embed camera passwords) exist only in the node's `config.json`. The cloud receives a projection with URLs stripped.
+- **No inbound surface.** The node makes outbound connections only. The local API on `:8080` is unauthenticated by design and meant for your LAN.
+
+Edge functions: `node-register` (pairing codes), `node-token` (secret → JWT exchange), `node-claim` (tie node to account), `sign-upload` (signed storage URLs), `turn-credentials` (STUN list always; short-lived Cloudflare TURN credentials when configured).
+
+## What is roadmap, not shipped
+
+Nightjar is early. Implemented and real: everything described above. Planned or partial:
+
+- **Nest camera bridge** via Google's SDM API — [issue #7](https://github.com/Snapsonic/nightjar/issues/7)
+- **ONVIF discovery** — cameras are added by RTSP URL today
+- **Dedicated package-detection model** — `package` is currently approximated from bag-like COCO classes
+- **Familiar faces** (listed on Pro) — coming
+- Detection thresholds and motion tuning as configuration rather than code constants
+
+The full picture lives in the [issue tracker](https://github.com/Snapsonic/nightjar/issues).

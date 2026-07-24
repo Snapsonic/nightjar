@@ -1,0 +1,90 @@
+---
+title: "Moving from Nest to Nightjar"
+sidebarTitle: "Nest migration"
+description: "A realistic, step-by-step plan for leaving Nest Aware — including what you keep, what you lose, and what it costs."
+icon: "arrow-right-arrow-left"
+---
+
+People leave Nest Aware for two reasons: the subscription price keeps climbing, and every minute of footage lives in Google's cloud. Nightjar flips both — recording stays on your disk, detection runs on your hardware, and the optional cloud plan costs about half as much.
+
+This guide is honest about the tradeoffs. What you keep: 24/7 recording, smart alerts (person, vehicle, animal, package), remote live view, and event history. What you lose: the Nest app, Google Home integration, and — this is the big one — your existing Nest cameras, at least for now.
+
+<Warning>
+**Nest cameras do not expose RTSP.** They cannot connect to Nightjar (or any third-party NVR) directly today. A bridge using Google's Smart Device Management (SDM) API is on the roadmap — follow [issue #7](https://github.com/Snapsonic/nightjar/issues/7) — but it is **not built yet**. The practical migration path is to run both systems side by side and swap camera hardware.
+</Warning>
+
+## The plan
+
+<Steps>
+  <Step title="Inventory your Nest devices">
+    List every camera and doorbell, where it is mounted, and whether it is wired or battery. Note which ones matter most — you can migrate in stages. Battery cameras are the hardest to replace one-for-one, because continuous RTSP streaming needs continuous power.
+  </Step>
+  <Step title="Stand up a Nightjar node">
+    Follow the [quickstart](/quickstart). You need a Linux box (NUC, Pi 5, NAS) and a disk. Do this first, before buying cameras — it is free, and you can verify the node works on your network with a single cheap camera.
+  </Step>
+  <Step title="Pick replacement cameras">
+    Any camera with RTSP works. Solid, widely available picks by Nest device role:
+
+    | Nest device | Replacement class | Example |
+    | --- | --- | --- |
+    | Nest Cam (outdoor, wired) | 4K/2K PoE bullet or turret with RTSP | Reolink RLC-810A class |
+    | Nest Cam (battery) | Wired PoE or plug-in Wi-Fi camera — battery cams generally cannot stream RTSP continuously | Reolink RLC-810A (PoE) or a plug-in Wi-Fi model |
+    | Nest Doorbell | RTSP-capable video doorbell | Reolink Video Doorbell, Amcrest AD410 |
+    | Nest Cam (indoor) | Any 2K indoor RTSP camera | Reolink E1 Pro class |
+    | Nest Cam with floodlight | PoE floodlight camera with RTSP | Reolink floodlight series |
+
+    **PoE vs Wi-Fi, honestly:** PoE is more reliable (one cable for power and data, no Wi-Fi dropouts) but you have to run Ethernet and probably buy a small PoE switch. Wi-Fi cameras are easier to place but still need a power outlet, and a wall of Wi-Fi cameras will congest a home network. If you are drilling holes anyway, run the cable.
+  </Step>
+  <Step title="Run both systems in parallel for a week">
+    Keep Nest Aware active while the new cameras come online in Nightjar. Compare coverage, night vision, and alert quality. Fix camera angles and motion problems while you still have a fallback. Your Nest cameras keep working in the Google Home app the whole time — the two systems do not interact.
+  </Step>
+  <Step title="Export your Nest history before canceling">
+    Once your subscription ends, your Nest video history is gone. Export it first via [Google Takeout](https://takeout.google.com) (select the Nest product). You can also download individual clips from the Google Home app. Do this **before** canceling — history is deleted per Google's retention policy after the subscription lapses.
+  </Step>
+  <Step title="Cancel Nest Aware">
+    Cancel in your Google account subscriptions. The cameras themselves keep offering live view in Google Home without a subscription, so you can keep a couple around as spares, sell them, or wait for the SDM bridge.
+  </Step>
+</Steps>
+
+## The cost math
+
+Monthly subscription, side by side (prices as of the current Nest lineup):
+
+| | Nest Aware | Nest Aware Plus | Nightjar Free | Nightjar Plus | Nightjar Pro |
+| --- | --- | --- | --- | --- | --- |
+| Price | $10/mo | $20/mo | $0 | $4.99/mo | $9.99/mo |
+| Event history | 30 days | 60 days | 3 days (cloud) | 30 days | 60 days |
+| 24/7 recording | Cloud, Plus only | Google's cloud | Your disk | Your disk | Your disk |
+| Smart alerts | Included | Included | Free, on your hardware | Included | Included |
+
+Nightjar has an up-front hardware cost that Nest does not. A realistic example for a three-camera home currently on Nest Aware Plus ($240/yr):
+
+| One-time hardware | Approximate street price |
+| --- | --- |
+| 3 × PoE camera (Reolink RLC-810A class) | ~$210 |
+| Raspberry Pi 5 kit or used mini-PC | ~$100–150 |
+| 1 TB disk + small PoE switch | ~$100 |
+| **Total** | **~$410–460** |
+
+Switching to Nightjar Plus ($60/yr) saves about $180/yr versus Aware Plus, so the hardware pays for itself in roughly **2 to 2.5 years** — faster if the free tier's 3-day cloud history is enough for you (then you save the full $240/yr and break even in under 2 years), and faster still versus a household with add-on cameras or future price increases. After payback, the savings recur; the cameras are yours either way.
+
+<Note>
+Hardware prices are approximate street prices, not quotes. The point of the math is the shape: a one-time cost that replaces a subscription that never ends.
+</Note>
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="Can I keep using the Nest app?">
+    Yes, for your Nest cameras. Nest hardware keeps working in the Google Home app with or without Nightjar running — the systems are independent. Nightjar cameras are viewed in the Nightjar local UI or at [app.nightjar.ca](https://app.nightjar.ca). There is no way to see Nightjar cameras in the Google Home app.
+  </Accordion>
+  <Accordion title="What happens to my old Nest clips?">
+    They live in Google's cloud and are deleted after your Nest Aware retention window — and your access ends when the subscription does. Export what you want to keep via Google Takeout before canceling. Nightjar cannot import Nest history; the export is for your own archive.
+  </Accordion>
+  <Accordion title="Will the Nest bridge support my camera model?">
+    Unknown until it is built. The planned bridge uses Google's Smart Device Management API, which covers most modern Nest cameras that work in the Google Home app, and requires a one-time $5 registration fee with Google for Device Access. Scope and per-model support will be worked out in the open — follow [issue #7](https://github.com/Snapsonic/nightjar/issues/7).
+  </Accordion>
+  <Accordion title="Do I lose remote access by leaving Nest?">
+    No. Remote live view is free on every Nightjar plan, including Free, with zero port forwarding. See [Remote access](/guides/remote-access).
+  </Accordion>
+</AccordionGroup>

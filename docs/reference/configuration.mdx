@@ -1,0 +1,97 @@
+---
+title: "Configuration"
+description: "Every field in the node's config.json, and the environment variables that control it."
+icon: "sliders"
+---
+
+The node's configuration lives in `config.json` inside the config directory (`/config` in the container, `./data/config` on the host with the default compose file). The file is created on first boot with defaults; edits are picked up and applied live — recorders and detectors reconcile against the new config without a restart. Writes are atomic.
+
+## config.json
+
+```json
+{
+  "version": 1,
+  "nodeName": "nightjar-node",
+  "cameras": [],
+  "retention": { "maxDays": 14, "diskHighWatermark": 0.9 },
+  "cloud": { "enabled": true },
+  "go2rtc": { "apiUrl": "http://127.0.0.1:1984" },
+  "paths": { "recordings": "/recordings", "db": "/db" }
+}
+```
+
+### Top level
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `version` | `1` | `1` | Config schema version |
+| `nodeName` | string (1–80) | `"nightjar-node"` | Shown in the local UI and the cloud app |
+| `cameras` | array | `[]` | See below — usually managed via the UI/API |
+
+### `retention`
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `maxDays` | integer 1–365 | `14` | Delete recording segments older than this |
+| `diskHighWatermark` | number 0.5–0.99 | `0.9` | Prune oldest segments when disk usage crosses this fraction |
+
+### `cloud`
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Set `false` for strictly local operation |
+| `supabaseUrl` | URL | — | Cloud endpoint; usually set via env var instead |
+| `supabaseAnonKey` | string | — | Cloud anon key; usually set via env var instead |
+
+If no URL/key is available from config or environment, the cloud link simply stays disabled — the node runs local-only.
+
+### `go2rtc`
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `apiUrl` | URL | `"http://127.0.0.1:1984"` | Where the node reaches the go2rtc API |
+
+### `paths`
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `recordings` | string | `"/recordings"` | Recording segments and event clips |
+| `db` | string | `"/db"` | SQLite database (segment index, events, upload queue) |
+
+### Camera entries
+
+Cameras are normally added through the UI or [API](/reference/node-api), but they live in this file:
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `id` | UUID | — | Generated on add |
+| `name` | string (1–80) | — | Display name |
+| `make`, `model` | string | — | Optional labels |
+| `rtspUrl` | URL | — | Main stream. May embed credentials — never leaves the node |
+| `rtspSubUrl` | URL | — | Optional substream, used for motion detection and low-bandwidth live view |
+| `enabled` | boolean | `true` | Master switch |
+| `record` | boolean | `true` | 24/7 recording |
+| `detect` | boolean | `true` | Motion detection and AI events |
+| `capabilities` | object | probed | Codec, resolution, fps from ffprobe |
+
+<Note>
+Motion and detection thresholds (frame diff limits, YOLOX confidence, clip pre/post-roll) are currently constants in the code, not configuration. See [Recording and events](/guides/recording-and-events) for their values.
+</Note>
+
+## Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NIGHTJAR_SUPABASE_URL` | — | Cloud endpoint. Overrides `cloud.supabaseUrl`. Leave unset (with the key) to run local-only |
+| `NIGHTJAR_SUPABASE_ANON_KEY` | — | Cloud anon key. Overrides `cloud.supabaseAnonKey` |
+| `CONFIG_DIR` | `/config` | Where `config.json` and `identity.json` live |
+| `DB_DIR` | `/db` | SQLite database directory |
+| `GO2RTC_CONFIG_DIR` | — | Where the node renders `go2rtc.yaml` for the go2rtc process |
+| `PORT` | `8080` | Local UI/API port |
+| `LOG_LEVEL` | `info` | Set `debug` for verbose logs |
+
+The Docker compose file wires the directories to `./data/*` on the host and passes the two `NIGHTJAR_SUPABASE_*` variables through (defaults point at the official cloud).
+
+## identity.json
+
+Alongside `config.json`, the node keeps `identity.json`: the node's machine secret (generated on first boot), its cloud node id after registration, and the current claim code while unclaimed. Treat it like a credential — anyone with the secret can act as your node. Deleting it resets the node's cloud identity.

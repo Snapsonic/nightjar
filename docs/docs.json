@@ -1,0 +1,76 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Nightjar",
+  "description": "Open-source NVR that watches through the night. Your cameras, your disk, your rules.",
+  "colors": {
+    "primary": "#f0a441",
+    "light": "#f6c274",
+    "dark": "#c77f22"
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "favicon": "/favicon.svg",
+  "appearance": {
+    "default": "dark"
+  },
+  "background": {
+    "color": {
+      "light": "#fdfaf4",
+      "dark": "#0a0c13"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "quickstart"]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/nest-migration",
+          "guides/cameras",
+          "guides/recording-and-events",
+          "guides/remote-access"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/node-api",
+          "reference/configuration",
+          "reference/architecture"
+        ]
+      },
+      {
+        "group": "Project",
+        "pages": [
+          "project/self-hosting-faq",
+          "project/contributing",
+          "project/license"
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/Snapsonic/nightjar"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open the app",
+      "href": "https://app.nightjar.ca"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Snapsonic/nightjar"
+    }
+  }
+}

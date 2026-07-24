@@ -1,0 +1,62 @@
+---
+title: "Contributing"
+description: "Monorepo layout, dev setup, and where to start."
+icon: "code-pull-request"
+---
+
+Nightjar is developed in the open at [github.com/Snapsonic/nightjar](https://github.com/Snapsonic/nightjar). Issues and pull requests are welcome.
+
+## Monorepo layout
+
+| Path | What it is |
+| --- | --- |
+| `apps/node` | The self-hosted NVR service (TypeScript, run via `tsx`, no build step) |
+| `apps/web` | Cloud dashboard (Next.js) at app.nightjar.ca |
+| `apps/marketing` | nightjar.ca |
+| `packages/shared` | Zod schemas and the realtime signaling protocol — the contract between everything |
+| `packages/db` | Generated Supabase types and typed clients |
+| `supabase/` | Migrations and edge functions |
+| `docker/` | Compose files for production and dev |
+
+## Dev setup
+
+Requires Node 22+ and pnpm.
+
+```bash
+pnpm install
+pnpm dev                                # all apps
+pnpm turbo run lint typecheck build     # what CI runs
+```
+
+To run the node itself you also need go2rtc and ffmpeg on your PATH (`brew install go2rtc ffmpeg` on macOS), or use `docker/compose.dev.yml`:
+
+```bash
+mkdir -p data/{config,db,recordings,go2rtc}
+
+# terminal 1 — go2rtc reading the config the node renders
+go2rtc -config data/go2rtc/go2rtc.yaml
+
+# terminal 2 — the node
+CONFIG_DIR=./data/config \
+DB_DIR=./data/db \
+GO2RTC_CONFIG_DIR=./data/go2rtc \
+pnpm --filter @nightjar/node dev
+```
+
+One-time: download the object-detection model (~20 MB):
+
+```bash
+pnpm --filter @nightjar/node fetch-model
+```
+
+Leave the `NIGHTJAR_SUPABASE_*` variables unset to develop local-only (the cloud link stays disabled). See the [node README](https://github.com/Snapsonic/nightjar/tree/main/apps/node) for the full module map and internals.
+
+## Where to start
+
+- Browse [good first issues](https://github.com/Snapsonic/nightjar/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+- The [roadmap items](/reference/architecture#what-is-roadmap-not-shipped) — ONVIF discovery, the Nest SDM bridge, configurable detection thresholds — are all open ground.
+- Docs fixes are contributions too; this site lives in `docs/`.
+
+## Licensing notes
+
+Contributions are accepted under [AGPL-3.0](/project/license), the project's license. One deliberate choice worth knowing: the object-detection weights are **YOLOX-tiny (Apache-2.0)**, not Ultralytics YOLO models, whose weights are AGPL and would complicate downstream use. Keep that in mind if you touch the detection stack.

@@ -1,0 +1,56 @@
+---
+title: "Remote access"
+description: "How pairing, WebRTC live view, and zero-port-forwarding remote access work — and the privacy model behind them."
+icon: "globe"
+---
+
+Remote access is optional. A Nightjar node runs forever without it. When you do want to check cameras away from home, pairing gives you remote live view and cloud event history with **zero port forwarding** — the node only ever makes outbound connections.
+
+## Pairing
+
+<Steps>
+  <Step title="The node registers itself">
+    On first boot with cloud enabled, the node generates a private machine secret, registers with the cloud, and receives a 6-character claim code. The code is shown in the local UI at `:8080` and expires after 15 minutes — the node automatically re-registers for a fresh one, so the UI always shows a working code.
+  </Step>
+  <Step title="You claim it">
+    Sign in at [app.nightjar.ca](https://app.nightjar.ca) and enter the code. This ties the node to your account.
+  </Step>
+  <Step title="The node connects">
+    The node exchanges its machine secret for a short-lived, node-scoped access token and opens one outbound realtime channel. That channel carries signaling and commands; the token is refreshed automatically before expiry.
+  </Step>
+</Steps>
+
+### What the node can and cannot access
+
+The node authenticates as a machine identity with its own scoped token — not as you. Database row-level security restricts it to its own rows: its node record, its cameras, its events. Its realtime channel is private to that node. In cloud storage it can only write under its own node-scoped path, via signed upload URLs. A compromised cloud account cannot reach into your LAN beyond what the node explicitly answers: live-view offers, snapshots, and status requests for its own cameras.
+
+## How remote live view works
+
+Live view is WebRTC, end to end:
+
+1. Your browser (at app.nightjar.ca) creates a WebRTC offer (WHEP) and sends it to the node over the relayed realtime signaling channel.
+2. The node hands the offer to its local go2rtc instance and relays the answer back the same way.
+3. Browser and node then negotiate a direct peer-to-peer connection using STUN to discover their public addresses. Video flows directly between your phone and your house — not through Nightjar's servers.
+4. When a direct path is impossible (strict NATs, some cellular carriers), the cloud can issue short-lived TURN relay credentials (Cloudflare) as a fallback, where the deployment has them configured. The Pro plan includes priority TURN relay for tricky networks.
+
+This is why `network_mode: host` matters in the Docker setup: WebRTC needs real UDP connectivity to negotiate the peer-to-peer path.
+
+## Zero port forwarding, explained
+
+Traditional NVR remote access means opening a port on your router and exposing the NVR's web interface to the internet — a well-known source of camera-system breaches. Nightjar never listens on the internet:
+
+- The node makes **one outbound connection** to the cloud for signaling and status.
+- Live video is negotiated peer-to-peer per session; nothing is left listening.
+- Your router configuration stays untouched. No port forwarding, no dynamic DNS, no VPN required.
+
+## The privacy model
+
+| | Where it lives |
+| --- | --- |
+| 24/7 recordings | Your disk only |
+| Camera RTSP URLs and credentials | Your node only — never synced |
+| Live video | Peer-to-peer WebRTC (or an encrypted TURN relay when needed) |
+| Event clips + thumbnails | Uploaded to the cloud only when paired — see [what reaches the cloud](/guides/recording-and-events#what-reaches-the-cloud-and-what-never-does) |
+| Account, node status, camera names | Nightjar cloud (Supabase) |
+
+Unpair or delete your account and the node keeps working locally — recordings, motion detection, and the local UI do not depend on the cloud.

@@ -1,0 +1,75 @@
+---
+title: "Recording and events"
+description: "How 24/7 recording, motion detection, AI events, and clip uploads work — and exactly what reaches the cloud."
+icon: "clapperboard"
+---
+
+## 24/7 recording
+
+Every camera with `record` enabled gets one long-lived ffmpeg process that copies the **main stream** — no transcoding, so CPU cost is near zero — into 60-second fragmented MP4 segments:
+
+```text
+<recordings>/<cameraId>/<YYYYMMDD>/<unix-timestamp>.mp4
+```
+
+Segments are indexed in a local SQLite database so time ranges can be cut into clips quickly. Crashed captures restart automatically with exponential backoff (capped at 60 s). Because segments are fragmented MP4, even the segment currently being written is readable — clips can cover "now".
+
+### Retention
+
+A pruner runs every 10 minutes and deletes the oldest segments when either limit is hit:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `retention.maxDays` | `14` | Segments older than this are deleted |
+| `retention.diskHighWatermark` | `0.9` | When the recordings disk is more than 90% full, oldest segments are deleted until it is not |
+
+Both are configurable per node — see the [configuration reference](/reference/configuration). The disk watermark is the safety net: recording never fills the disk to the point of failure.
+
+## Motion detection
+
+For each camera with `detect` enabled, one ffmpeg process decodes the **substream** (falling back to the main stream) into 5 fps, 320×180 grayscale frames. Each frame is compared per-pixel against a rolling background:
+
+- A pixel counts as changed when it differs from the background by more than 25 (of 255).
+- A frame counts as motion when more than 1.5% of pixels changed.
+- **Motion starts** after 2 consecutive motion frames.
+- **Motion ends** after 10 seconds without a motion frame.
+
+The background adapts continuously (5% learning rate per frame), so gradual lighting changes do not trigger events. These thresholds are constants in the code today, not configuration.
+
+## AI object detection
+
+When motion starts, the node fetches a full-color JPEG snapshot of the live main stream from go2rtc and runs it through a **YOLOX-tiny** ONNX model in a worker thread, on your CPU. A second pass runs 10 seconds in if the event is still open, to catch subjects that enter after the trigger.
+
+- Detections with score ≥ 0.5 are kept and attached to the event.
+- The event's kind upgrades by priority: **person > package > vehicle > animal > motion**.
+- If the snapshot or inference fails, nothing breaks — the event just stays kind `motion`.
+
+Detection is snapshot-based (one or two frames per event), not continuous video analysis. That is what makes it cheap enough to run on a Pi 5.
+
+<Note>
+The model (~20 MB) is downloaded at Docker image build time. The `package` class is currently approximated from bag-like object classes; a dedicated package-detection model is planned.
+</Note>
+
+## Events and clips
+
+When motion ends, the node cuts a clip from the recorded segments covering the motion episode **plus 5 seconds of pre-roll and 5 seconds of post-roll**, and extracts a thumbnail from the clip's midpoint. The event — kind, score, timestamps, detections — is written to the local SQLite database and shown in the local UI.
+
+## What reaches the cloud (and what never does)
+
+<Warning>
+Nothing reaches the cloud unless you pair the node with an account. Unpaired, Nightjar is fully local.
+</Warning>
+
+When paired, this is the complete list of what the node uploads:
+
+| Data | Uploaded? |
+| --- | --- |
+| Event rows (kind, score, timestamps, detection metadata) | Yes |
+| Event clips + thumbnails | Yes — via a serial upload queue |
+| Node status heartbeat, camera list (no URLs, no credentials) | Yes |
+| 24/7 recordings | **Never** |
+| Camera RTSP URLs and credentials | **Never** |
+
+The upload queue is offline-safe: it survives restarts, retries with backoff, and is bounded to the newest 500 events. If the internet is down, events queue locally and upload when the link returns.
+
+Cloud clips carry an expiry. Currently uploads are stamped with a **3-day expiry** — the Free plan's window. Plus (30 days) and Pro (60 days) extend cloud event history; see [nightjar.ca](https://nightjar.ca/#pricing). Your local recordings and local event history follow your own retention settings regardless of plan.

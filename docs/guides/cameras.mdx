@@ -1,0 +1,87 @@
+---
+title: "Adding cameras"
+description: "RTSP URL patterns for major brands, main vs substream, and current limitations."
+icon: "video"
+---
+
+Nightjar works with any camera that exposes an RTSP stream. You add a camera by pasting its RTSP URL into the local UI at `http://<host>:8080` (or via the [local API](/reference/node-api)). The node probes the stream with ffprobe to learn its codec, resolution, and frame rate.
+
+<Note>
+Camera RTSP URLs — which usually embed the camera's username and password — **never leave the node**. Only a credential-free projection of each camera (name, make, model, capabilities) is synced to the cloud when the node is paired.
+</Note>
+
+## RTSP URL patterns by brand
+
+Replace `user`, `pass`, and the IP with your camera's values. Port 554 is the RTSP default.
+
+<Tabs>
+  <Tab title="Reolink">
+    ```text
+    Main:      rtsp://user:pass@192.168.1.50:554/h264Preview_01_main
+    Substream: rtsp://user:pass@192.168.1.50:554/h264Preview_01_sub
+    ```
+    Enable RTSP under camera settings → Network → Advanced → Port settings if it is off. On some newer models the main stream defaults to H.265 — see the HEVC note below.
+  </Tab>
+  <Tab title="Amcrest / Dahua">
+    ```text
+    Main:      rtsp://user:pass@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
+    Substream: rtsp://user:pass@192.168.1.50:554/cam/realmonitor?channel=1&subtype=1
+    ```
+    Amcrest firmware is Dahua-based; the same URLs work for both.
+  </Tab>
+  <Tab title="Hikvision">
+    ```text
+    Main:      rtsp://user:pass@192.168.1.50:554/Streaming/Channels/101
+    Substream: rtsp://user:pass@192.168.1.50:554/Streaming/Channels/102
+    ```
+    The last digit selects the stream: `1` = main, `2` = sub.
+  </Tab>
+  <Tab title="Ubiquiti (UniFi Protect)">
+    UniFi Protect cameras do not expose plain RTSP directly. In the Protect app, open the camera → Settings → Advanced and enable an RTSPS stream per quality level. Protect gives you an `rtsps://` URL on port 7441, for example:
+
+    ```text
+    rtsps://192.168.1.1:7441/abcDEF123?enableSrtp
+    ```
+
+    Use that URL as-is. Note it is served by the Protect console, not the camera itself.
+  </Tab>
+</Tabs>
+
+If your brand is not listed, check the manufacturer's documentation for "RTSP URL" — nearly every wired IP camera has one. Verify any URL before adding it:
+
+```bash
+ffprobe -rtsp_transport tcp "rtsp://user:pass@192.168.1.50:554/h264Preview_01_main"
+```
+
+## Main stream vs substream
+
+Add both URLs when your camera has them.
+
+- **Main stream** — full resolution. Used for 24/7 recording (stream copy, no transcoding) and for event clips and detection snapshots.
+- **Substream** — low resolution (typically 640×360 or similar). Used for motion detection, which decodes video at 5 fps continuously; doing that on a 4K main stream wastes CPU. The substream is also available for remote live view on constrained connections.
+
+If no substream is configured, motion detection falls back to decoding the main stream. It works, but on small hardware (Pi 5 with several cameras) the substream is the difference between comfortable and struggling.
+
+## Current limitations
+
+<AccordionGroup>
+  <Accordion title="ONVIF discovery is on the roadmap">
+    Today you add cameras by RTSP URL. Automatic discovery of cameras on your LAN via ONVIF is planned — see the [issue tracker](https://github.com/Snapsonic/nightjar/issues).
+  </Accordion>
+  <Accordion title="H.265/HEVC: records fine, browser playback is patchy">
+    Recording is a stream copy, so H.265 cameras record without issues and the files play in VLC or any desktop player. But browser support for H.265 playback is inconsistent, so event clips and live view from an H.265 stream may not play in some browsers. Practical workaround: set the camera's main stream to H.264 in its own settings. Follow progress on the [issue tracker](https://github.com/Snapsonic/nightjar/issues).
+  </Accordion>
+  <Accordion title="Battery cameras">
+    Cameras that sleep to save battery cannot provide a continuous RTSP stream. Nightjar is built around continuous recording; use wired cameras.
+  </Accordion>
+</AccordionGroup>
+
+## Per-camera switches
+
+Each camera has three flags you can set in configuration (see the [configuration reference](/reference/configuration)):
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch — disables streaming, recording, and detection |
+| `record` | `true` | 24/7 recording to disk |
+| `detect` | `true` | Motion detection (and therefore AI events) |

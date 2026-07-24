@@ -1,0 +1,65 @@
+---
+title: "What is Nightjar?"
+sidebarTitle: "Introduction"
+description: "An open-source NVR that watches through the night — with an optional cloud for remote access and event history."
+icon: "moon"
+---
+
+Nightjar is a self-hosted network video recorder (NVR) with an optional cloud service. You run the node on your own hardware — a NUC, a Raspberry Pi 5, a NAS — and point it at any camera that speaks RTSP. Recording, motion detection, and AI object detection all happen on your machine. The cloud at [app.nightjar.ca](https://app.nightjar.ca) adds remote access and cloud event history, and it is optional.
+
+Nightjar is an alternative to Google Nest Aware and Blue Iris. The whole stack is open source under [AGPL-3.0](/project/license).
+
+## Three promises
+
+<CardGroup cols={3}>
+  <Card title="Your footage stays home" icon="house">
+    24/7 recording goes to your own disk. Only the event clips you opt into ever reach the cloud.
+  </Card>
+  <Card title="Zero port forwarding" icon="shield">
+    The node keeps a single outbound connection. Remote live view flows peer-to-peer over WebRTC. Nothing on your network is exposed to the internet.
+  </Card>
+  <Card title="AI on your hardware" icon="microchip">
+    Person, vehicle, animal, and package detection runs locally with a small ONNX model. No per-camera cloud inference fees.
+  </Card>
+</CardGroup>
+
+## How it fits together
+
+```
+┌─ your network ──────────────────────────┐      ┌─ cloud (optional) ─────────────┐
+│  RTSP cams ─► go2rtc ─► WebRTC live     │      │  app.nightjar.ca (Next.js)     │
+│                 │                        │      │  Supabase: auth · Postgres ·   │
+│  ffmpeg ──► fMP4 segments on your disk  │◄────►│  Realtime (signaling/commands) │
+│  motion ─► onnx detect ─► event clips ──┼─────►│  Storage (event clips only)    │
+│  nightjar-node (TypeScript)             │      │                                │
+└─────────────────────────────────────────┘      └────────────────────────────────┘
+```
+
+The node is a TypeScript service that supervises [go2rtc](https://github.com/AlexxIT/go2rtc) for live streaming, runs ffmpeg for continuous recording, and runs motion and object detection itself. If you pair it with a cloud account, it holds one outbound realtime channel for signaling and status — that is the only link between your house and the internet.
+
+Everything in this diagram is in one repository: [github.com/Snapsonic/nightjar](https://github.com/Snapsonic/nightjar).
+
+## Works with open cameras
+
+Anything that speaks RTSP works today: Reolink, Amcrest, Hikvision, Dahua, Ubiquiti, and most generic IP cameras. ONVIF discovery is on the roadmap. A bridge for Nest cameras (via Google's Smart Device Management API) is planned but not built yet — see the honest details in the [Nest migration guide](/guides/nest-migration).
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Self-host a node with Docker in about 10 minutes.
+  </Card>
+  <Card title="Moving from Nest" icon="arrow-right-arrow-left" href="/guides/nest-migration">
+    A realistic plan for leaving Nest Aware, including what you keep and what you lose.
+  </Card>
+  <Card title="Add cameras" icon="video" href="/guides/cameras">
+    RTSP URL patterns for the major brands, and why substreams matter.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/reference/architecture">
+    Node internals, data flow, and the security model.
+  </Card>
+</CardGroup>
+
+## Pricing, briefly
+
+Self-hosting is free forever, including remote live view. Paid plans fund development and add cloud event history: Free keeps event clips in the cloud for 3 days, Plus ($4.99/mo) for 30 days, Pro ($9.99/mo) for 60 days. Details at [nightjar.ca](https://nightjar.ca/#pricing). Plans are in early access.

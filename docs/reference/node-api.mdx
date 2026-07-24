@@ -1,0 +1,128 @@
+---
+title: "Local node API"
+description: "The REST API served by the node on port 8080, alongside the local UI."
+icon: "terminal"
+---
+
+The node serves a small REST API on `0.0.0.0:8080` (change with the `PORT` environment variable). It is the same API the local UI uses. It is **unauthenticated** and intended for your LAN — do not expose port 8080 to the internet. Remote access goes through [cloud pairing](/guides/remote-access) instead.
+
+Base URL in the examples: `http://nvr.local:8080`.
+
+## GET /api/status
+
+Node identity, cloud link state, go2rtc health, and cameras.
+
+```bash
+curl http://nvr.local:8080/api/status
+```
+
+```json
+{
+  "nodeId": "0b2f7c1e-6f0f-4c2e-9b57-2f2f6f0e8d11",
+  "nodeName": "nightjar-node",
+  "version": "0.3.0",
+  "cloud": { "state": "online" },
+  "go2rtcHealthy": true,
+  "cameras": [
+    {
+      "id": "9a1de7a2-1d5c-4b9e-8f3a-52a1c9d6b0aa",
+      "name": "Driveway",
+      "make": "Reolink",
+      "enabled": true,
+      "record": true,
+      "detect": true,
+      "capabilities": { "hasSubstream": true, "videoCodec": "h264", "width": 2560, "height": 1440, "fps": 20 },
+      "hasSubstream": true,
+      "online": true
+    }
+  ]
+}
+```
+
+`cloud.state` is one of `disabled`, `registering`, `unclaimed` (with `claimCode` and `claimCodeExpiresAt`), `connecting`, `online`, or `error` (with `message`). `nodeId` is `null` before first registration. Camera objects never include RTSP URLs.
+
+## GET /api/events
+
+The 50 most recent local events, newest first.
+
+```bash
+curl http://nvr.local:8080/api/events
+```
+
+```json
+[
+  {
+    "id": "5e9c0f5e-3a3f-4e46-9a0a-1d2b3c4d5e6f",
+    "cameraId": "9a1de7a2-1d5c-4b9e-8f3a-52a1c9d6b0aa",
+    "kind": "person",
+    "score": 0.87,
+    "startedAt": "2026-07-24T03:12:41.000Z",
+    "endedAt": "2026-07-24T03:13:02.000Z",
+    "clipStatus": "uploaded"
+  }
+]
+```
+
+`kind` is `motion`, `person`, `vehicle`, `animal`, or `package`. `clipStatus` is `local`, `uploading`, or `uploaded`.
+
+## GET /api/cameras
+
+Cameras with their live/online state (same shape as `cameras` in `/api/status`).
+
+```bash
+curl http://nvr.local:8080/api/cameras
+```
+
+## POST /api/cameras
+
+Add a camera. `name` and `rtspUrl` are required; `rtspSubUrl`, `make`, and `model` are optional. The node probes the stream on add (a failed probe still adds the camera, with empty capabilities). Returns `201` with the created camera, or `400` on an invalid body.
+
+```bash
+curl -X POST http://nvr.local:8080/api/cameras \
+  -H "content-type: application/json" \
+  -d '{
+    "name": "Driveway",
+    "rtspUrl": "rtsp://user:pass@192.168.1.50:554/h264Preview_01_main",
+    "rtspSubUrl": "rtsp://user:pass@192.168.1.50:554/h264Preview_01_sub",
+    "make": "Reolink"
+  }'
+```
+
+## DELETE /api/cameras/\{id\}
+
+Remove a camera. Returns `204` on success, `404` if the id is unknown.
+
+```bash
+curl -X DELETE http://nvr.local:8080/api/cameras/9a1de7a2-1d5c-4b9e-8f3a-52a1c9d6b0aa
+```
+
+## POST /api/cameras/\{id\}/probe
+
+Re-probe the camera's main stream with ffprobe (TCP transport, 10 s timeout) and store the result. Returns the capabilities, `404` for an unknown camera, or `502` if the probe fails.
+
+```bash
+curl -X POST http://nvr.local:8080/api/cameras/9a1de7a2-1d5c-4b9e-8f3a-52a1c9d6b0aa/probe
+```
+
+```json
+{
+  "hasSubstream": true,
+  "videoCodec": "h264",
+  "audioCodec": "aac",
+  "width": 2560,
+  "height": 1440,
+  "fps": 20
+}
+```
+
+## POST /api/whep/\{cameraId\}
+
+WHEP endpoint for local live view. Send an SDP offer with content type `application/sdp`; the node proxies it to go2rtc and returns the SDP answer with status `201`. The browser UI uses this so it never talks to go2rtc (`:1984`) directly.
+
+```bash
+curl -X POST http://nvr.local:8080/api/whep/9a1de7a2-1d5c-4b9e-8f3a-52a1c9d6b0aa \
+  -H "content-type: application/sdp" \
+  --data-binary @offer.sdp
+```
+
+Errors: `404` unknown camera, `400` missing/empty SDP body, `502` go2rtc unreachable or stream unavailable.

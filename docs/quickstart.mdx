@@ -1,0 +1,94 @@
+---
+title: "Quickstart"
+description: "Self-host a Nightjar node with Docker in about 10 minutes."
+icon: "rocket"
+---
+
+This guide takes you from nothing to live view and 24/7 recording on your LAN, then optionally pairs the node with a cloud account for remote access.
+
+## Prerequisites
+
+- A Linux box with Docker and Docker Compose. A NUC or other mini-PC, a Raspberry Pi 5, or a NAS that runs Docker all work. Images are published for amd64 and arm64.
+- A disk with room for recordings. Budget roughly 1–2 GB per hour per 1080p camera — see [hardware and disk sizing](/project/self-hosting-faq).
+- At least one camera with an RTSP URL. See [Adding cameras](/guides/cameras) for brand-specific URL patterns.
+
+<Warning>
+WebRTC needs `network_mode: host`, which only works fully on Linux. Docker Desktop on macOS or Windows will run the stack, but remote live view will be degraded. Use a Linux host for full functionality.
+</Warning>
+
+## Start the node
+
+<Steps>
+  <Step title="Download the compose file">
+    ```bash
+    mkdir nightjar && cd nightjar
+    curl -fsSLO https://raw.githubusercontent.com/Snapsonic/nightjar/main/docker/docker-compose.yml
+    ```
+  </Step>
+  <Step title="Create the data directories">
+    ```bash
+    mkdir -p data/{config,db,recordings,go2rtc}
+    ```
+    Recordings land in `data/recordings`. If you want them on a bigger disk, mount that disk there before starting.
+  </Step>
+  <Step title="Start the stack">
+    ```bash
+    docker compose up -d
+    ```
+    This starts two containers: `go2rtc` (streaming) and `node` (the Nightjar service). Both use host networking.
+  </Step>
+  <Step title="Open the local UI">
+    Open `http://<host>:8080` in a browser on your LAN. Replace `<host>` with the machine's IP or hostname. The go2rtc admin UI is also available at `http://<host>:1984` if you ever need to debug streams.
+  </Step>
+</Steps>
+
+## Add your first camera
+
+<Steps>
+  <Step title="Find your camera's RTSP URL">
+    Every brand has its own URL pattern. For a Reolink camera it looks like:
+
+    ```text
+    rtsp://user:pass@192.168.1.50:554/h264Preview_01_main
+    ```
+
+    See [Adding cameras](/guides/cameras) for Amcrest, Dahua, Hikvision, and Ubiquiti patterns.
+  </Step>
+  <Step title="Add it in the local UI">
+    In the UI at `:8080`, add a camera with a name and the RTSP URL. Add the substream URL too if the camera has one — motion detection runs on it, and it is much lighter. Camera credentials in these URLs never leave the node.
+  </Step>
+  <Step title="Verify live view">
+    The camera tile should show live video within a few seconds. Recording starts automatically: 60-second segments written to `data/recordings/<cameraId>/<YYYYMMDD>/`.
+  </Step>
+</Steps>
+
+<Note>
+If the stream does not come up, test the URL with ffprobe or VLC first — see [troubleshooting](/project/self-hosting-faq#troubleshooting).
+</Note>
+
+## Optional: pair with the cloud
+
+Pairing adds remote live view and cloud event history. It is optional — everything above works local-only, forever.
+
+<Steps>
+  <Step title="Create an account">
+    Sign up free at [app.nightjar.ca](https://app.nightjar.ca).
+  </Step>
+  <Step title="Enter the claim code">
+    The local UI at `:8080` shows a 6-character claim code. Enter it in the app to claim the node. Codes expire after 15 minutes, but the node automatically fetches a fresh one, so the UI always shows a working code.
+  </Step>
+  <Step title="Done">
+    The node connects outbound to the cloud — no port forwarding, no firewall changes. Your cameras appear in the app, with live view over WebRTC and event clips as they happen. See [Remote access](/guides/remote-access) for how this works and what data leaves your network.
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Recording and events" icon="clapperboard" href="/guides/recording-and-events">
+    Retention defaults, motion detection, and AI events.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/reference/configuration">
+    Everything in `config.json` and the environment variables.
+  </Card>
+</CardGroup>
