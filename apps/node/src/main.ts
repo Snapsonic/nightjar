@@ -4,6 +4,7 @@ import { CloudLink } from "./cloud/link.js";
 import { IdentityStore } from "./config/identity.js";
 import { ConfigStore } from "./config/store.js";
 import { NodeDb } from "./db.js";
+import { DetectWorker } from "./detect/worker.js";
 import { EventPipeline } from "./events/pipeline.js";
 import { Go2rtcSupervisor } from "./go2rtc/supervisor.js";
 import { createLogger } from "./log.js";
@@ -25,13 +26,12 @@ async function main(): Promise<void> {
 
   const cameras = new CameraManager(store, log.child("cameras"));
 
+  // Recorder and motion detector reconcile themselves on config changes.
   const recorder = new Recorder(db, store, log.child("recorder"));
-  const motion = new MotionDetector(log.child("motion"));
-  for (const camera of store.get().cameras) {
-    if (!camera.enabled) continue;
-    if (camera.record) recorder.start(camera);
-    if (camera.detect) motion.start(camera);
-  }
+  recorder.sync();
+  const motion = new MotionDetector(store, log.child("motion"));
+  motion.sync();
+  const detect = new DetectWorker(log.child("detect"));
 
   const link = new CloudLink({
     store,
@@ -43,7 +43,14 @@ async function main(): Promise<void> {
   });
   link.start();
 
-  const pipeline = new EventPipeline({ db, link, log: log.child("events") });
+  const pipeline = new EventPipeline({
+    db,
+    link,
+    recorder,
+    detect,
+    store,
+    log: log.child("events"),
+  });
   pipeline.attach(motion);
 
   const api = await startApiServer({
@@ -52,6 +59,7 @@ async function main(): Promise<void> {
     cameras,
     go2rtc,
     link,
+    db,
     version: VERSION,
     log: log.child("api"),
   });
@@ -67,7 +75,7 @@ async function main(): Promise<void> {
         motion.stopAll();
         recorder.stopAll();
         go2rtc.stop();
-        await Promise.allSettled([api.close(), link.stop()]);
+        await Promise.allSettled([api.close(), link.stop(), detect.close()]);
         db.close();
         log.info("shutdown complete");
         process.exit(0);

@@ -1,45 +1,388 @@
-import type { NvrEvent } from "@nightjar/shared";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
+import {
+  SignUploadResponse,
+  type Detection,
+  type EventKind,
+  type NvrEvent,
+} from "@nightjar/shared";
 import type { Json } from "@nightjar/db";
 import type { CloudLink } from "../cloud/link.js";
+import type { ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
+import type { DetectWorker } from "../detect/worker.js";
 import type { Logger } from "../log.js";
-import type { MotionDetector, MotionEvent } from "../motion/detector.js";
+import {
+  FRAME_HEIGHT,
+  FRAME_WIDTH,
+  type MotionDetector,
+  type MotionEvent,
+} from "../motion/detector.js";
+import type { Recorder } from "../recorder/recorder.js";
+
+const execFileAsync = promisify(execFile);
+
+/** Clip padding around the motion episode. */
+const PRE_ROLL_MS = 5_000;
+const POST_ROLL_MS = 5_000;
+/** Extra wait before cutting so the post-roll footage exists on disk. */
+const CLOSE_SLACK_MS = 2_000;
+/** Bounded offline queue — oldest jobs beyond this are dropped. */
+const MAX_QUEUED_UPLOADS = 500;
+const UPLOAD_IDLE_MS = 10_000;
+const UPLOAD_BACKOFF_BASE_MS = 5_000;
+const UPLOAD_BACKOFF_CAP_MS = 300_000;
+const CLIP_EXPIRY_MS = 3 * 86_400_000;
+
+interface OpenEvent {
+  id: string;
+  cameraId: string;
+  kind: EventKind;
+  score: number;
+  startedAtMs: number;
+  endedAtMs: number | null;
+  changedFraction: number;
+  detections: Detection[];
+  closeTimer: NodeJS.Timeout | null;
+}
+
+export interface EventPipelineDeps {
+  db: NodeDb;
+  link: CloudLink;
+  recorder: Recorder;
+  detect: DetectWorker;
+  store: ConfigStore;
+  log: Logger;
+}
 
 /**
- * Event pipeline — STUB (postEvent is real).
+ * Motion -> event -> clip -> upload pipeline.
  *
- * Intended design: motion events from the detector are merged into NvrEvents
- * with a merge window (motion within ~30s of an open event extends it rather
- * than opening a new one). While an event is open, triggering frames go to the
- * detect worker to upgrade kind from "motion" to person/vehicle/animal/package
- * (keep the max score). On close: cut a clip from the recorder's segments
- * (exportRange), grab a thumbnail via go2rtc /api/frame.jpeg, request signed
- * upload URLs from the sign-upload edge function ({eventId, files:
- * ["clip.mp4","thumb.jpg"]}), upload via uploadToSignedUrl, then update the
- * events row clip_status local -> uploading -> uploaded. Failed uploads sit in
- * the upload_queue table and are retried with backoff.
+ * motionStart opens a candidate event (kind "motion", score 0.5) and hands
+ * the triggering frame to the detect worker, which may upgrade kind/score.
+ * motionEnd schedules the close: clip bounds are start-5s .. end+5s (clamped
+ * to now); the clip is cut from the recorder's segments, a mid-clip 640w jpeg
+ * thumbnail is extracted, the event row is written to SQLite and an upload
+ * job is enqueued. A serial uploader worker (survives restarts via the
+ * upload_queue table, retries with backoff, bounded to the newest 500 jobs)
+ * pushes the event row, signed-URL uploads and the event_clips row to the
+ * cloud whenever the link is up; offline, jobs simply stay queued.
  */
 export class EventPipeline {
   private unsubscribe: (() => void) | null = null;
+  private readonly open = new Map<string, OpenEvent>();
+  private running = true;
+  private uploaderLoop: Promise<void> | null = null;
+  private readonly wakers = new Set<() => void>();
 
-  constructor(
-    private readonly deps: {
-      db: NodeDb;
-      link: CloudLink;
-      log: Logger;
-    },
-  ) {}
+  constructor(private readonly deps: EventPipelineDeps) {}
 
   attach(detector: MotionDetector): void {
-    this.unsubscribe = detector.onMotion((event: MotionEvent) => {
-      // TODO(events): merge into an open NvrEvent per the design above.
-      this.deps.log.debug(`motion on camera ${event.cameraId} (unhandled — pipeline is a stub)`);
+    this.unsubscribe = detector.onMotion((event) => this.onMotion(event));
+    this.uploaderLoop = this.runUploader().catch((err) => {
+      this.deps.log.error(`uploader crashed: ${err instanceof Error ? err.message : String(err)}`);
     });
+  }
+
+  stop(): void {
+    this.running = false;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    for (const open of this.open.values()) {
+      if (open.closeTimer) clearTimeout(open.closeTimer);
+    }
+    this.open.clear();
+    for (const wake of [...this.wakers]) wake();
+    void this.uploaderLoop;
+  }
+
+  /* ---------- motion handling ---------- */
+
+  private onMotion(event: MotionEvent): void {
+    if (!this.running) return;
+    if (event.type === "start") {
+      const existing = this.open.get(event.cameraId);
+      if (existing) {
+        // Motion resumed while the close was pending — extend the same event.
+        if (existing.closeTimer) {
+          clearTimeout(existing.closeTimer);
+          existing.closeTimer = null;
+          existing.endedAtMs = null;
+        }
+        void this.runDetect(existing, event.frame);
+        return;
+      }
+      const candidate: OpenEvent = {
+        id: randomUUID(),
+        cameraId: event.cameraId,
+        kind: "motion",
+        score: 0.5,
+        startedAtMs: event.atMs,
+        endedAtMs: null,
+        changedFraction: event.changedFraction,
+        detections: [],
+        closeTimer: null,
+      };
+      this.open.set(event.cameraId, candidate);
+      this.deps.log.info(
+        `motion started on camera ${event.cameraId} (${(event.changedFraction * 100).toFixed(1)}% changed) — event ${candidate.id}`,
+      );
+      void this.runDetect(candidate, event.frame);
+    } else {
+      const candidate = this.open.get(event.cameraId);
+      if (!candidate || candidate.closeTimer) return;
+      candidate.endedAtMs = event.atMs;
+      // Wait until the post-roll footage exists on disk before cutting.
+      candidate.closeTimer = setTimeout(() => {
+        this.open.delete(event.cameraId);
+        void this.close(candidate).catch((err) => {
+          this.deps.log.error(
+            `event ${candidate.id} close failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }, POST_ROLL_MS + CLOSE_SLACK_MS);
+    }
+  }
+
+  /** Hand the triggering frame to the detect worker; upgrade kind/score. */
+  private async runDetect(candidate: OpenEvent, frame: Buffer): Promise<void> {
+    try {
+      const detections = await this.deps.detect.detect(frame, FRAME_WIDTH, FRAME_HEIGHT);
+      if (detections.length === 0) return;
+      candidate.detections.push(...detections);
+      const best = detections.reduce((a, b) => (b.score > a.score ? b : a));
+      candidate.kind = best.kind;
+      candidate.score = Math.max(candidate.score, best.score);
+    } catch (err) {
+      this.deps.log.warn(`detect failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /* ---------- event close: clip + thumbnail + row + queue ---------- */
+
+  private clipDir(eventId: string): string {
+    return path.join(this.deps.store.get().paths.recordings, ".clips", eventId);
+  }
+
+  private async close(candidate: OpenEvent): Promise<void> {
+    const endMs = candidate.endedAtMs ?? Date.now();
+    const clipStartMs = candidate.startedAtMs - PRE_ROLL_MS;
+    const clipEndMs = Math.min(endMs + POST_ROLL_MS, Date.now());
+
+    const dir = this.clipDir(candidate.id);
+    const clipPath = path.join(dir, "clip.mp4");
+    const thumbPath = path.join(dir, "thumb.jpg");
+    let hasClip = false;
+    try {
+      mkdirSync(dir, { recursive: true });
+      await this.deps.recorder.exportRange(candidate.cameraId, clipStartMs, clipEndMs, clipPath);
+      await this.extractThumbnail(clipPath, thumbPath);
+      hasClip = true;
+    } catch (err) {
+      this.deps.log.warn(
+        `event ${candidate.id}: clip export failed (${err instanceof Error ? err.message : String(err)}) — keeping event without clip`,
+      );
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const event: NvrEvent = {
+      id: candidate.id,
+      cameraId: candidate.cameraId,
+      kind: candidate.kind,
+      score: candidate.score,
+      startedAt: new Date(candidate.startedAtMs).toISOString(),
+      endedAt: new Date(endMs).toISOString(),
+      clipStatus: "local",
+      ...(hasClip ? { thumbnailPath: thumbPath } : {}),
+      metadata: {
+        changedFraction: candidate.changedFraction,
+        detections: candidate.detections,
+        ...(hasClip ? { clipStartMs, clipEndMs, durationS: (clipEndMs - clipStartMs) / 1000 } : {}),
+      },
+    };
+    this.deps.db.insertEvent(event);
+    this.deps.log.info(
+      `event ${event.id} closed (${event.kind}, ${((clipEndMs - clipStartMs) / 1000).toFixed(1)}s${hasClip ? ", clip ready" : ", no clip"})`,
+    );
+
+    if (hasClip) {
+      this.deps.db.enqueueUpload(event.id, dir);
+      for (const dropped of this.deps.db.trimUploadQueue(MAX_QUEUED_UPLOADS)) {
+        rmSync(dropped.file, { recursive: true, force: true });
+        this.deps.log.warn(`upload queue full — dropped event ${dropped.event_id}`);
+      }
+      this.kickUploader();
+    }
+  }
+
+  /** Single frame from the clip midpoint (probed duration), scaled to 640w. */
+  private async extractThumbnail(clipPath: string, thumbPath: string): Promise<void> {
+    let midS = 0;
+    try {
+      const { stdout } = await execFileAsync(
+        "ffprobe",
+        ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", clipPath],
+        { timeout: 15_000, maxBuffer: 1024 * 1024 },
+      );
+      const duration = Number(stdout.trim());
+      if (Number.isFinite(duration) && duration > 0) midS = duration / 2;
+    } catch {
+      // fall back to the first frame
+    }
+    // prettier-ignore
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-nostdin", "-loglevel", "error", "-y",
+        "-ss", midS.toFixed(3),
+        "-i", clipPath,
+        "-frames:v", "1",
+        "-vf", "scale=640:-2",
+        "-q:v", "4",
+        thumbPath,
+      ],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
+    );
+  }
+
+  /* ---------- uploader worker ---------- */
+
+  private kickUploader(): void {
+    for (const wake of [...this.wakers]) wake();
+  }
+
+  /** Interruptible sleep — resolves early on stop()/kickUploader(). */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer);
+        this.wakers.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, ms);
+      timer.unref();
+      this.wakers.add(wake);
+    });
+  }
+
+  private async runUploader(): Promise<void> {
+    while (this.running) {
+      const job = this.deps.db.nextUpload();
+      if (!job) {
+        await this.sleep(UPLOAD_IDLE_MS);
+        continue;
+      }
+      if (!this.deps.link.getClient()) {
+        // Cloud unlinked/offline — leave the job queued and check again later.
+        await this.sleep(UPLOAD_IDLE_MS);
+        continue;
+      }
+      try {
+        await this.uploadEvent(job.event_id, job.file);
+        this.deps.db.deleteUpload(job.id);
+        rmSync(job.file, { recursive: true, force: true });
+        this.deps.log.info(`event ${job.event_id} uploaded`);
+      } catch (err) {
+        this.deps.db.bumpUploadAttempts(job.id);
+        const backoff = Math.min(
+          UPLOAD_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
+          UPLOAD_BACKOFF_CAP_MS,
+        );
+        this.deps.log.warn(
+          `upload of event ${job.event_id} failed (attempt ${job.attempts + 1}): ` +
+            `${err instanceof Error ? err.message : String(err)} — retrying in ${Math.round(backoff / 1000)}s`,
+        );
+        await this.sleep(backoff);
+      }
+    }
+  }
+
+  /** One full event upload: cloud row, signed URLs, files, clip row, status. */
+  private async uploadEvent(eventId: string, dir: string): Promise<void> {
+    const client = this.deps.link.getClient();
+    const nodeId = this.deps.link.getNodeId();
+    if (!client || !nodeId) throw new Error("cloud session not ready");
+    const row = this.deps.db.getEvent(eventId);
+    if (!row) throw new Error(`event ${eventId} missing locally`);
+    const clipPath = path.join(dir, "clip.mp4");
+    const thumbPath = path.join(dir, "thumb.jpg");
+    const clipBytes = statSync(clipPath).size;
+    const metadata = JSON.parse(row.metadata) as Record<string, unknown>;
+
+    // (a) event row (upsert — retries must be idempotent)
+    this.deps.db.updateEventClipStatus(eventId, "uploading");
+    const { error: eventError } = await client.from("events").upsert({
+      id: row.id,
+      node_id: nodeId,
+      camera_id: row.camera_id,
+      kind: row.kind,
+      score: row.score,
+      started_at: row.started_at,
+      ended_at: row.ended_at,
+      clip_status: "uploading",
+      metadata: metadata as Json,
+    });
+    if (eventError) throw new Error(`cloud event insert: ${eventError.message}`);
+
+    // (b) signed upload URLs from the sign-upload edge function
+    const { data: signData, error: signError } = await client.functions.invoke("sign-upload", {
+      body: { eventId, files: ["clip.mp4", "thumb.jpg"] },
+    });
+    if (signError) throw new Error(`sign-upload: ${signError.message}`);
+    const uploads = SignUploadResponse.parse(signData).uploads;
+    const clipUpload = uploads.find((u) => u.file === "clip.mp4");
+    const thumbUpload = uploads.find((u) => u.file === "thumb.jpg");
+    if (!clipUpload || !thumbUpload) throw new Error("sign-upload response missing files");
+
+    // (c) upload both files to the signed URLs
+    for (const [upload, filePath, contentType] of [
+      [clipUpload, clipPath, "video/mp4"],
+      [thumbUpload, thumbPath, "image/jpeg"],
+    ] as const) {
+      const { error } = await client.storage
+        .from("event-clips")
+        .uploadToSignedUrl(upload.path, upload.token, readFileSync(filePath), {
+          contentType,
+          upsert: true,
+        });
+      if (error) throw new Error(`upload ${upload.file}: ${error.message}`);
+    }
+
+    // (d) event_clips row
+    const durationS =
+      typeof metadata.durationS === "number"
+        ? metadata.durationS
+        : Math.max(
+            0,
+            (Date.parse(row.ended_at ?? row.started_at) - Date.parse(row.started_at)) / 1000,
+          );
+    const { error: clipRowError } = await client.from("event_clips").upsert(
+      {
+        event_id: eventId,
+        storage_path: clipUpload.path,
+        bytes: clipBytes,
+        duration_s: durationS,
+        expires_at: new Date(Date.now() + CLIP_EXPIRY_MS).toISOString(),
+      },
+      { onConflict: "event_id" },
+    );
+    if (clipRowError) throw new Error(`event_clips insert: ${clipRowError.message}`);
+
+    // (e) final status
+    const { error: statusError } = await client
+      .from("events")
+      .update({ clip_status: "uploaded", thumbnail_path: thumbUpload.path })
+      .eq("id", eventId);
+    if (statusError) throw new Error(`event status update: ${statusError.message}`);
+    this.deps.db.updateEventClipStatus(eventId, "uploaded", thumbUpload.path);
   }
 
   /**
    * Persist an event locally and, when the cloud link is up, insert it into
-   * the cloud events table. Used by the pipeline once it produces real events.
+   * the cloud events table. Kept for ad-hoc events outside the motion flow.
    */
   async postEvent(event: NvrEvent): Promise<void> {
     this.deps.db.insertEvent(event);
@@ -59,10 +402,5 @@ export class EventPipeline {
       metadata: JSON.parse(JSON.stringify(event.metadata)) as Json,
     });
     if (error) this.deps.log.warn(`cloud event insert failed: ${error.message}`);
-  }
-
-  stop(): void {
-    this.unsubscribe?.();
-    this.unsubscribe = null;
   }
 }

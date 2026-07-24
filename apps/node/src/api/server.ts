@@ -8,6 +8,7 @@ import type { CameraManager } from "../cameras/manager.js";
 import type { CloudLink } from "../cloud/link.js";
 import type { ConfigStore } from "../config/store.js";
 import type { IdentityStore } from "../config/identity.js";
+import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
 
@@ -25,6 +26,7 @@ export interface ApiDeps {
   cameras: CameraManager;
   go2rtc: Go2rtcSupervisor;
   link: CloudLink;
+  db: NodeDb;
   version: string;
   log: Logger;
 }
@@ -61,6 +63,19 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       go2rtcHealthy: streams !== null,
       cameras: config.cameras.map((camera) => toPublic(camera, streams)),
     };
+  });
+
+  /** Recent local events (newest first) for the UI event list. */
+  app.get("/api/events", async () => {
+    return deps.db.recentEvents(50).map((row) => ({
+      id: row.id,
+      cameraId: row.camera_id,
+      kind: row.kind,
+      score: row.score,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      clipStatus: row.clip_status,
+    }));
   });
 
   app.get("/api/cameras", async () => {

@@ -256,6 +256,45 @@ function renderCameras(status) {
   el("noCameras").classList.toggle("hidden", status.cameras.length > 0);
 }
 
+/* ---------------- events ---------------- */
+
+function renderEvents(events, cameraNames) {
+  const list = el("eventList");
+  list.textContent = "";
+  for (const event of events) {
+    const item = document.createElement("li");
+    item.className = "event-item";
+    const kind = document.createElement("span");
+    kind.className = `event-kind event-kind-${event.kind}`;
+    kind.textContent = event.kind;
+    const camera = document.createElement("span");
+    camera.className = "event-camera";
+    camera.textContent = cameraNames.get(event.cameraId) || event.cameraId.slice(0, 8);
+    const when = document.createElement("span");
+    when.className = "event-time";
+    when.textContent = new Date(event.startedAt).toLocaleString();
+    const status = document.createElement("span");
+    status.className = "event-status";
+    status.textContent = event.clipStatus === "uploaded" ? "uploaded" : event.clipStatus;
+    item.append(kind, camera, when, status);
+    list.append(item);
+  }
+  el("noEvents").classList.toggle("hidden", events.length > 0);
+}
+
+async function refreshEvents(status) {
+  let events;
+  try {
+    const res = await fetch("/api/events");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    events = await res.json();
+  } catch {
+    return; // keep the previous list on transient errors
+  }
+  const cameraNames = new Map(status.cameras.map((c) => [c.id, c.name]));
+  renderEvents(events, cameraNames);
+}
+
 /* ---------------- status polling ---------------- */
 
 async function refresh() {
@@ -272,6 +311,7 @@ async function refresh() {
   renderHeader(status);
   renderPairing(status);
   renderCameras(status);
+  refreshEvents(status);
 }
 
 /* ---------------- add-camera form ---------------- */

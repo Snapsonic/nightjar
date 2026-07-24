@@ -53,16 +53,18 @@ Production runs via `docker/docker-compose.yml` at the repo root.
 | `src/cloud/link.ts` | real | Register → claim poll → realtime channel; WHEP/snapshot/status handlers, heartbeat, camera sync |
 | `src/api/server.ts` | real | Local REST API + WHEP proxy + static UI |
 | `src/db.ts` | real | SQLite (segments / events mirror / upload_queue) |
-| `src/recorder/recorder.ts` | **stub** | Interface + segment index; ffmpeg capture lands next milestone |
-| `src/motion/detector.ts` | **stub** | Typed motion-event emitter; 5 fps substream frame-diff planned |
-| `src/detect/worker.ts` | **stub** | `detect(frame)` interface; onnxruntime worker_thread planned |
-| `src/events/pipeline.ts` | **stub** | `postEvent()` works; motion→event merge/clip/upload planned |
-| `ui/` | real | Vanilla-JS local admin UI (no build step) |
+| `src/recorder/recorder.ts` | real | Per-camera ffmpeg segment capture (60s fMP4), SQLite index, retention pruner, `exportRange()` |
+| `src/motion/detector.ts` | real | 5 fps substream grayscale frame-diff vs rolling background; motionStart/motionEnd events |
+| `src/detect/worker.ts` | scaffold | worker_thread pool-of-1 with transferable-frame messaging; ONNX (YOLOX) inference stubbed to `[]` |
+| `src/events/pipeline.ts` | real | motion → event → clip + thumbnail → local row → serial upload queue (offline-safe, bounded) |
+| `ui/` | real | Vanilla-JS local admin UI (no build step), camera grid + recent events |
 
 ## Notes
 
-- The claim code is only returned once by `node-register`; if the node
-  restarts while still unclaimed the UI can't show it again (re-pair from the
-  app, which can look the node up by claim code server-side).
+- The claim code from `node-register` is persisted in `identity.json`, so an
+  unclaimed node keeps showing a valid code across restarts. If the stored
+  code has expired, the node re-registers with a fresh identity (the old
+  unclaimed row is garbage-collected server-side) so the UI always shows a
+  working code.
 - Camera RTSP URLs (which may embed credentials) never leave the node — only
   the `CameraPublic` projection is synced to the cloud.

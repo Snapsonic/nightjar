@@ -19,6 +19,18 @@ export interface UploadQueueRow {
   created_at: number;
 }
 
+export interface EventRow {
+  id: string;
+  camera_id: string;
+  kind: string;
+  score: number;
+  started_at: string;
+  ended_at: string | null;
+  clip_status: string;
+  thumbnail_path: string | null;
+  metadata: string;
+}
+
 /**
  * Local SQLite state at ${DB_DIR}/nightjar.db (default /db).
  * Holds the recording segment index, a local mirror of events, and the
@@ -86,6 +98,40 @@ export class NodeDb {
     this.db.prepare("UPDATE segments SET ended_at = ? WHERE id = ?").run(endedAtMs, id);
   }
 
+  deleteSegment(id: number): void {
+    this.db.prepare("DELETE FROM segments WHERE id = ?").run(id);
+  }
+
+  /** Rows still marked in-progress (ended_at NULL) for one camera — dangling after a crash. */
+  openSegments(cameraId: string): SegmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, camera_id, path, started_at, ended_at FROM segments
+         WHERE camera_id = ? AND ended_at IS NULL ORDER BY started_at ASC`,
+      )
+      .all(cameraId) as SegmentRow[];
+  }
+
+  /** All indexed segment paths for one camera (dedupe on recorder restart). */
+  segmentPaths(cameraId: string): string[] {
+    return (
+      this.db.prepare("SELECT path FROM segments WHERE camera_id = ?").all(cameraId) as {
+        path: string;
+      }[]
+    ).map((row) => row.path);
+  }
+
+  /** Completed segments that started before cutoffMs, oldest first. */
+  segmentsStartedBefore(cutoffMs: number, limit: number): SegmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, camera_id, path, started_at, ended_at FROM segments
+         WHERE started_at < ? AND ended_at IS NOT NULL
+         ORDER BY started_at ASC LIMIT ?`,
+      )
+      .all(cutoffMs, limit) as SegmentRow[];
+  }
+
   /** Segments overlapping [t0Ms, t1Ms) for one camera, oldest first. */
   segmentsBetween(cameraId: string, t0Ms: number, t1Ms: number): SegmentRow[] {
     return this.db
@@ -121,6 +167,64 @@ export class NodeDb {
     this.db
       .prepare("INSERT INTO upload_queue (event_id, file, created_at) VALUES (?, ?, ?)")
       .run(eventId, file, Date.now());
+  }
+
+  /** Oldest pending upload job, or undefined when the queue is empty. */
+  nextUpload(): UploadQueueRow | undefined {
+    return this.db
+      .prepare(
+        "SELECT id, event_id, file, attempts, created_at FROM upload_queue ORDER BY id ASC LIMIT 1",
+      )
+      .get() as UploadQueueRow | undefined;
+  }
+
+  bumpUploadAttempts(id: number): void {
+    this.db.prepare("UPDATE upload_queue SET attempts = attempts + 1 WHERE id = ?").run(id);
+  }
+
+  deleteUpload(id: number): void {
+    this.db.prepare("DELETE FROM upload_queue WHERE id = ?").run(id);
+  }
+
+  /** Drop the oldest jobs beyond `max`, returning the dropped rows (caller cleans files). */
+  trimUploadQueue(max: number): UploadQueueRow[] {
+    const dropped = this.db
+      .prepare(
+        `SELECT id, event_id, file, attempts, created_at FROM upload_queue
+         ORDER BY id DESC LIMIT -1 OFFSET ?`,
+      )
+      .all(max) as UploadQueueRow[];
+    for (const row of dropped) this.deleteUpload(row.id);
+    return dropped;
+  }
+
+  getEvent(eventId: string): EventRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT id, camera_id, kind, score, started_at, ended_at, clip_status, thumbnail_path, metadata
+         FROM events WHERE id = ?`,
+      )
+      .get(eventId) as EventRow | undefined;
+  }
+
+  /** Most recent events for the local UI, newest first. */
+  recentEvents(limit: number): EventRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, camera_id, kind, score, started_at, ended_at, clip_status, thumbnail_path, metadata
+         FROM events ORDER BY started_at DESC LIMIT ?`,
+      )
+      .all(limit) as EventRow[];
+  }
+
+  updateEventClipStatus(eventId: string, clipStatus: string, thumbnailPath?: string): void {
+    if (thumbnailPath !== undefined) {
+      this.db
+        .prepare("UPDATE events SET clip_status = ?, thumbnail_path = ? WHERE id = ?")
+        .run(clipStatus, thumbnailPath, eventId);
+    } else {
+      this.db.prepare("UPDATE events SET clip_status = ? WHERE id = ?").run(clipStatus, eventId);
+    }
   }
 
   close(): void {

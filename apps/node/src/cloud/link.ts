@@ -189,36 +189,60 @@ export class CloudLink {
   }
 
   private async ensureRegistered(): Promise<void> {
-    if (this.deps.identity.get().nodeId) return;
+    const identity = this.deps.identity.get();
+    if (identity.nodeId) {
+      // Restarted while (possibly) unclaimed — reuse the persisted claim code
+      // so the UI can still show it.
+      if (!this.claim && identity.claimCode && identity.claimCodeExpiresAt) {
+        this.claim = { code: identity.claimCode, expiresAt: identity.claimCodeExpiresAt };
+      }
+      return;
+    }
     this.state = { state: "registering" };
     const response = NodeRegisterResponse.parse(
       await this.callFn("node-register", {
-        nodeSecret: this.deps.identity.get().nodeSecret,
+        nodeSecret: identity.nodeSecret,
         nodeName: this.deps.store.get().nodeName,
         version: this.deps.version,
       }),
     );
-    this.deps.identity.setNodeId(response.nodeId);
+    this.deps.identity.setRegistration(
+      response.nodeId,
+      response.claimCode,
+      response.claimCodeExpiresAt,
+    );
     this.claim = { code: response.claimCode, expiresAt: response.claimCodeExpiresAt };
     this.log.info(`registered as node ${response.nodeId}; claim code ${response.claimCode}`);
   }
 
   /** Poll node-token every 30s until claimed. Returns null if stopped. */
   private async pollUntilClaimed(): Promise<NodeToken | null> {
-    const identity = this.deps.identity.get();
-    const nodeId = identity.nodeId;
-    if (!nodeId) throw new Error("no nodeId after registration");
     while (this.running) {
+      const identity = this.deps.identity.get();
+      const nodeId = identity.nodeId;
+      if (!nodeId) throw new Error("no nodeId after registration");
       const parsed = TokenResponse.parse(
         await this.callFn("node-token", { nodeId, nodeSecret: identity.nodeSecret }),
       );
       if (parsed.claimed && parsed.accessToken && parsed.expiresAt) {
+        this.claim = null;
+        this.deps.identity.clearClaim();
         return { accessToken: parsed.accessToken, expiresAt: parsed.expiresAt };
+      }
+      // Unclaimed with no usable code (expired, or lost before persistence
+      // existed): re-register with a fresh identity so the UI always has a
+      // valid code. The abandoned row is garbage-collected server-side.
+      if (!this.claim || Date.parse(this.claim.expiresAt) <= Date.now()) {
+        this.log.info("claim code missing or expired — re-registering for a fresh code");
+        this.claim = null;
+        this.deps.identity.regenerate();
+        await this.ensureRegistered();
+        continue;
       }
       this.state = {
         state: "unclaimed",
-        claimCode: this.claim?.code ?? null,
-        claimCodeExpiresAt: this.claim?.expiresAt ?? null,
+        claimCode: this.claim.code,
+        claimCodeExpiresAt: this.claim.expiresAt,
       };
       await this.sleep(TOKEN_POLL_MS);
     }
