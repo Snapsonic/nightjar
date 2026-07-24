@@ -1,0 +1,27 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# builds
+.next/
+dist/
+out/
+.turbo/
+*.tsbuildinfo
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# vercel / supabase local state
+.vercel/
+supabase/.temp/
+supabase/.branches/
+
+# node runtime data (self-hosted NVR)
+docker/data/
+
+# misc
+.DS_Store
+*.log

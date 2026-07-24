@@ -1,0 +1,30 @@
+# Nightjar self-hosted NVR node.
+#   mkdir -p data/{config,db,recordings,go2rtc} && docker compose up -d
+# Local UI: http://<host>:8080   go2rtc admin: http://<host>:1984
+#
+# network_mode: host is required for WebRTC (ICE/UDP). Works on Linux;
+# Docker Desktop (macOS/Windows) will run but remote WebRTC will be degraded.
+services:
+  go2rtc:
+    image: alexxit/go2rtc:1.9.10
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/go2rtc:/config
+
+  node:
+    image: ghcr.io/snapsonic/nightjar-node:latest
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - go2rtc
+    environment:
+      # Points the node at the Nightjar cloud (leave defaults for nightjar.ca).
+      NIGHTJAR_SUPABASE_URL: ${NIGHTJAR_SUPABASE_URL:-}
+      NIGHTJAR_SUPABASE_ANON_KEY: ${NIGHTJAR_SUPABASE_ANON_KEY:-}
+      GO2RTC_CONFIG_DIR: /go2rtc-config
+    volumes:
+      - ./data/config:/config
+      - ./data/db:/db
+      - ./data/recordings:/recordings
+      - ./data/go2rtc:/go2rtc-config
