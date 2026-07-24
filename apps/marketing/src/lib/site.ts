@@ -6,6 +6,7 @@ export const site = {
   url: "https://nightjar.ca",
   appUrl: "https://app.nightjar.ca",
   githubUrl: "https://github.com/Snapsonic/nightjar",
+  docsUrl: "https://night-jar.mintlify.app",
   email: "hello@nightjar.ca",
   company: "Snapsonic",
 } as const;
@@ -20,4 +21,5 @@ export const navLinks: readonly NavLink[] = [
   { label: "Open source", href: "/#open-source" },
   { label: "Pricing", href: "/#pricing" },
   { label: "FAQ", href: "/#faq" },
+  { label: "Docs", href: "https://night-jar.mintlify.app" },
 ] as const;
