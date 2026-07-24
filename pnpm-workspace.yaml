@@ -4,4 +4,6 @@ packages:
 allowBuilds:
   better-sqlite3: true
   esbuild: true
+  # false: postinstall only fetches CUDA EP binaries; bundled CPU binaries are all we use.
+  onnxruntime-node: false
   sharp: true

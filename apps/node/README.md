@@ -33,6 +33,12 @@ NIGHTJAR_SUPABASE_ANON_KEY=<anon key> \
 pnpm --filter @nightjar/node dev
 ```
 
+One-time: download the object-detection model (~20 MB, see below):
+
+```sh
+pnpm --filter @nightjar/node fetch-model
+```
+
 Local UI: http://localhost:8080 (add cameras, live view, pairing code).
 Leave the `NIGHTJAR_SUPABASE_*` vars unset to run local-only (cloud link
 disabled). Set `PORT` to change the UI port, `LOG_LEVEL=debug` for verbose
@@ -55,9 +61,42 @@ Production runs via `docker/docker-compose.yml` at the repo root.
 | `src/db.ts` | real | SQLite (segments / events mirror / upload_queue) |
 | `src/recorder/recorder.ts` | real | Per-camera ffmpeg segment capture (60s fMP4), SQLite index, retention pruner, `exportRange()` |
 | `src/motion/detector.ts` | real | 5 fps substream grayscale frame-diff vs rolling background; motionStart/motionEnd events |
-| `src/detect/worker.ts` | scaffold | worker_thread pool-of-1 with transferable-frame messaging; ONNX (YOLOX) inference stubbed to `[]` |
+| `src/detect/worker.ts` | real | worker_thread pool-of-1 running YOLOX-tiny via onnxruntime-node on go2rtc JPEG snapshots (see "Object detection") |
 | `src/events/pipeline.ts` | real | motion → event → clip + thumbnail → local row → serial upload queue (offline-safe, bounded) |
 | `ui/` | real | Vanilla-JS local admin UI (no build step), camera grid + recent events |
+
+## Object detection
+
+Motion-triggered events are classified by a YOLOX-tiny ONNX model running in
+a worker thread (onnxruntime-node, CPU execution provider, ORT default thread
+settings). On motionStart (and once more 10s in, if the event is still open)
+the pipeline fetches a full-color JPEG from go2rtc's `/api/frame.jpeg` — the
+320x180 grayscale motion-analysis frames are too small/colorless for
+detection — and the worker letterboxes it to 416x416 and runs one forward
+pass. Detections with score ≥ 0.5 upgrade the event kind by priority
+person > package > vehicle > animal > motion; all detections land in the
+event's `metadata.detections`. Snapshot or inference failure is non-fatal:
+the event simply stays kind `motion`.
+
+**Model weights** (not committed — `models/*.onnx` is gitignored):
+
+- Source: official Megvii YOLOX release —
+  <https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx>
+- License: **Apache-2.0**
+  (<https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE>).
+  Deliberately not Ultralytics YOLOv5/YOLOv8 — those weights are AGPL.
+- Download: `pnpm --filter @nightjar/node fetch-model`
+  (`scripts/fetch-model.mjs`; the Docker image runs it at build time). If the
+  model file is missing at runtime the worker logs a clear hint and
+  detections are disabled — everything else keeps working.
+
+COCO → event-kind mapping: person → `person`; bicycle/car/motorcycle/bus/
+truck → `vehicle`; bird/cat/dog/horse/sheep/cow/bear → `animal`;
+backpack/handbag/suitcase → `package`. The `package` mapping via bag-like
+COCO classes is an approximation — a dedicated package-detection model comes
+later. Thresholds (conf 0.35, NMS IoU 0.45, pipeline min score 0.5) are
+constants in `src/detect/inference-worker.ts` / `src/events/pipeline.ts`, not
+NodeConfig.
 
 ## Notes
 

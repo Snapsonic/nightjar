@@ -13,14 +13,10 @@ import type { Json } from "@nightjar/db";
 import type { CloudLink } from "../cloud/link.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
+import { go2rtcStreamName } from "@nightjar/shared";
 import type { DetectWorker } from "../detect/worker.js";
 import type { Logger } from "../log.js";
-import {
-  FRAME_HEIGHT,
-  FRAME_WIDTH,
-  type MotionDetector,
-  type MotionEvent,
-} from "../motion/detector.js";
+import type { MotionDetector, MotionEvent } from "../motion/detector.js";
 import type { Recorder } from "../recorder/recorder.js";
 
 const execFileAsync = promisify(execFile);
@@ -28,6 +24,20 @@ const execFileAsync = promisify(execFile);
 /** Clip padding around the motion episode. */
 const PRE_ROLL_MS = 5_000;
 const POST_ROLL_MS = 5_000;
+/** go2rtc snapshot fetch budget — on timeout the event simply stays "motion". */
+const SNAPSHOT_TIMEOUT_MS = 2_000;
+/** Detections below this score are discarded by the pipeline. */
+const MIN_DETECTION_SCORE = 0.5;
+/** One extra detection pass this long after motionStart (if still open). */
+const REDETECT_DELAY_MS = 10_000;
+/** Event kind upgrade priority — higher wins regardless of score. */
+const KIND_PRIORITY: Record<EventKind, number> = {
+  person: 4,
+  package: 3,
+  vehicle: 2,
+  animal: 1,
+  motion: 0,
+};
 /** Extra wait before cutting so the post-roll footage exists on disk. */
 const CLOSE_SLACK_MS = 2_000;
 /** Bounded offline queue — oldest jobs beyond this are dropped. */
@@ -47,6 +57,7 @@ interface OpenEvent {
   changedFraction: number;
   detections: Detection[];
   closeTimer: NodeJS.Timeout | null;
+  redetectTimer: NodeJS.Timeout | null;
 }
 
 export interface EventPipelineDeps {
@@ -61,9 +72,11 @@ export interface EventPipelineDeps {
 /**
  * Motion -> event -> clip -> upload pipeline.
  *
- * motionStart opens a candidate event (kind "motion", score 0.5) and hands
- * the triggering frame to the detect worker, which may upgrade kind/score.
- * motionEnd schedules the close: clip bounds are start-5s .. end+5s (clamped
+ * motionStart opens a candidate event (kind "motion", score 0.5), grabs a
+ * full-color JPEG snapshot from go2rtc (the 320x180 grayscale motion frame is
+ * too small/colorless for detection) and hands it to the detect worker
+ * (YOLOX-tiny), which may upgrade kind/score; a second pass runs 10s in if
+ * the event is still open. motionEnd schedules the close: clip bounds are start-5s .. end+5s (clamped
  * to now); the clip is cut from the recorder's segments, a mid-clip 640w jpeg
  * thumbnail is extracted, the event row is written to SQLite and an upload
  * job is enqueued. A serial uploader worker (survives restarts via the
@@ -93,6 +106,7 @@ export class EventPipeline {
     this.unsubscribe = null;
     for (const open of this.open.values()) {
       if (open.closeTimer) clearTimeout(open.closeTimer);
+      if (open.redetectTimer) clearTimeout(open.redetectTimer);
     }
     this.open.clear();
     for (const wake of [...this.wakers]) wake();
@@ -112,7 +126,7 @@ export class EventPipeline {
           existing.closeTimer = null;
           existing.endedAtMs = null;
         }
-        void this.runDetect(existing, event.frame);
+        void this.runDetect(existing);
         return;
       }
       const candidate: OpenEvent = {
@@ -125,12 +139,19 @@ export class EventPipeline {
         changedFraction: event.changedFraction,
         detections: [],
         closeTimer: null,
+        redetectTimer: null,
       };
       this.open.set(event.cameraId, candidate);
       this.deps.log.info(
         `motion started on camera ${event.cameraId} (${(event.changedFraction * 100).toFixed(1)}% changed) — event ${candidate.id}`,
       );
-      void this.runDetect(candidate, event.frame);
+      void this.runDetect(candidate);
+      // One more pass mid-event to catch subjects that enter after the trigger.
+      candidate.redetectTimer = setTimeout(() => {
+        candidate.redetectTimer = null;
+        if (this.open.get(event.cameraId) === candidate) void this.runDetect(candidate);
+      }, REDETECT_DELAY_MS);
+      candidate.redetectTimer.unref();
     } else {
       const candidate = this.open.get(event.cameraId);
       if (!candidate || candidate.closeTimer) return;
@@ -138,6 +159,10 @@ export class EventPipeline {
       // Wait until the post-roll footage exists on disk before cutting.
       candidate.closeTimer = setTimeout(() => {
         this.open.delete(event.cameraId);
+        if (candidate.redetectTimer) {
+          clearTimeout(candidate.redetectTimer);
+          candidate.redetectTimer = null;
+        }
         void this.close(candidate).catch((err) => {
           this.deps.log.error(
             `event ${candidate.id} close failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -147,15 +172,52 @@ export class EventPipeline {
     }
   }
 
-  /** Hand the triggering frame to the detect worker; upgrade kind/score. */
-  private async runDetect(candidate: OpenEvent, frame: Buffer): Promise<void> {
+  /**
+   * Full-color JPEG of the camera's live main stream via go2rtc — the
+   * 320x180 grayscale motion frames are unusable for object detection.
+   * Returns null on any failure (the event then simply stays "motion").
+   */
+  private async fetchSnapshot(cameraId: string): Promise<Buffer | null> {
+    const apiUrl = this.deps.store.get().go2rtc.apiUrl.replace(/\/+$/, "");
+    const src = encodeURIComponent(go2rtcStreamName(cameraId));
     try {
-      const detections = await this.deps.detect.detect(frame, FRAME_WIDTH, FRAME_HEIGHT);
+      const res = await fetch(`${apiUrl}/api/frame.jpeg?src=${src}`, {
+        signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        this.deps.log.warn(`detect snapshot for camera ${cameraId}: HTTP ${res.status}`);
+        return null;
+      }
+      return Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      this.deps.log.warn(
+        `detect snapshot for camera ${cameraId} failed: ${err instanceof Error ? err.message : String(err)} — event stays "motion"`,
+      );
+      return null;
+    }
+  }
+
+  /** Snapshot -> detect worker -> merge detections and upgrade kind/score. */
+  private async runDetect(candidate: OpenEvent): Promise<void> {
+    try {
+      const jpeg = await this.fetchSnapshot(candidate.cameraId);
+      if (!jpeg) return;
+      const detections = (await this.deps.detect.detect(jpeg)).filter(
+        (d) => d.score >= MIN_DETECTION_SCORE,
+      );
       if (detections.length === 0) return;
       candidate.detections.push(...detections);
-      const best = detections.reduce((a, b) => (b.score > a.score ? b : a));
-      candidate.kind = best.kind;
-      candidate.score = Math.max(candidate.score, best.score);
+      for (const detection of detections) {
+        if (KIND_PRIORITY[detection.kind] > KIND_PRIORITY[candidate.kind]) {
+          candidate.kind = detection.kind;
+        }
+        candidate.score = Math.max(candidate.score, detection.score);
+      }
+      this.deps.log.info(
+        `event ${candidate.id}: detected ${detections
+          .map((d) => `${d.kind} ${(d.score * 100).toFixed(0)}%`)
+          .join(", ")} — kind ${candidate.kind}`,
+      );
     } catch (err) {
       this.deps.log.warn(`detect failed: ${err instanceof Error ? err.message : String(err)}`);
     }

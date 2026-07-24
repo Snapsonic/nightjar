@@ -3,15 +3,19 @@ import type { Detection } from "@nightjar/shared";
 import type { Logger } from "../log.js";
 import type { DetectRequest, DetectResponse } from "./inference-worker.js";
 
+/** Warn when a single inference call takes longer than this. */
+const SLOW_INFERENCE_MS = 2_000;
+/** Safety valve: resolve [] if the worker never answers (hung session). */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /**
  * Object-detection front end: a pool of one worker_thread (see
- * inference-worker.ts) shared across cameras. Frames are posted with a
- * transferable ArrayBuffer (zero-copy into the thread) and matched back by
- * request id. Inference itself is still stubbed — the worker returns []
- * until the onnxruntime-node + YOLOX (Apache-licensed) session lands — but
- * the threading, messaging and failure paths are final. If the worker cannot
- * start (or dies), detect() degrades to returning [] so the event pipeline
- * keeps running.
+ * inference-worker.ts) shared across cameras. JPEG snapshots are posted with
+ * a transferable ArrayBuffer (zero-copy into the thread) and matched back by
+ * request id. The worker runs a YOLOX-tiny ONNX session (Apache-2.0, see
+ * inference-worker.ts for provenance); if the worker cannot start (or dies,
+ * e.g. missing model file), detect() degrades to returning [] so the event
+ * pipeline keeps running with kind "motion".
  */
 export class DetectWorker {
   private worker: Worker | null = null;
@@ -42,7 +46,7 @@ export class DetectWorker {
         if (this.worker === worker) this.failWorker(worker);
       });
       this.worker = worker;
-      this.log.info("detect worker thread started (inference stubbed)");
+      this.log.info("detect worker thread started (YOLOX-tiny, CPU)");
       return worker;
     } catch (err) {
       this.workerFailed = true;
@@ -65,21 +69,38 @@ export class DetectWorker {
   }
 
   /**
-   * Run object detection on one grayscale frame (width x height, 1 byte/px).
-   * The frame is copied into a standalone ArrayBuffer and transferred to the
-   * worker. Returns [] while inference is stubbed or the worker is down.
+   * Run object detection on one JPEG-encoded snapshot. The bytes are copied
+   * into a standalone ArrayBuffer and transferred to the worker. Returns []
+   * when the worker is down, the model file is missing, or nothing relevant
+   * is detected.
    */
-  async detect(frame: Buffer, width: number, height: number): Promise<Detection[]> {
+  async detect(jpeg: Buffer): Promise<Detection[]> {
     const worker = this.ensureWorker();
     if (!worker) return [];
     // Standalone ArrayBuffer so the transfer never detaches a pooled Buffer slab.
-    const data = new ArrayBuffer(frame.byteLength);
-    new Uint8Array(data).set(frame);
+    const data = new ArrayBuffer(jpeg.byteLength);
+    new Uint8Array(data).set(jpeg);
     const id = this.nextId++;
-    return new Promise<Detection[]>((resolve) => {
-      this.pending.set(id, resolve);
-      worker.postMessage({ id, width, height, data } satisfies DetectRequest, [data]);
+    const startedAt = Date.now();
+    const detections = await new Promise<Detection[]>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          this.log.warn(`detect request ${id} timed out after ${REQUEST_TIMEOUT_MS}ms`);
+          resolve([]);
+        }
+      }, REQUEST_TIMEOUT_MS);
+      timeout.unref();
+      this.pending.set(id, (result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      });
+      worker.postMessage({ id, data } satisfies DetectRequest, [data]);
     });
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > SLOW_INFERENCE_MS) {
+      this.log.warn(`slow inference: ${elapsed}ms for one frame (CPU overloaded?)`);
+    }
+    return detections;
   }
 
   /** Terminate the worker thread. */

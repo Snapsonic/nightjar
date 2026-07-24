@@ -1,0 +1,2 @@
+# Model weights are downloaded, never committed (pnpm --filter @nightjar/node fetch-model).
+models/*.onnx

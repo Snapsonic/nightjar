@@ -33,8 +33,6 @@ export type MotionEvent =
       atMs: number;
       /** Fraction of pixels that differ from the rolling background (0..1). */
       changedFraction: number;
-      /** Copy of the triggering grayscale frame (FRAME_WIDTH x FRAME_HEIGHT) for the detect worker. */
-      frame: Buffer;
     }
   | { type: "end"; cameraId: string; atMs: number };
 
@@ -61,8 +59,10 @@ interface CameraMotion {
  * decodes the substream (fallback: main) into 5 fps 320x180 grayscale raw
  * frames on stdout. A rolling background (bg = bg*0.95 + frame*0.05) is
  * compared per pixel; a frame is "motion" when >1.5% of pixels differ by
- * more than 25. motionStart after 2 consecutive motion frames (with a copy
- * of the triggering frame for the detect worker); motionEnd after 10s quiet.
+ * more than 25. motionStart after 2 consecutive motion frames (the event
+ * pipeline then pulls a full-color go2rtc snapshot for object detection —
+ * these gray analysis frames are too small/colorless for that); motionEnd
+ * after 10s quiet.
  * Crashed decoders restart with exponential backoff (cap 60s).
  */
 export class MotionDetector {
@@ -271,7 +271,6 @@ export class MotionDetector {
           cameraId: cam.camera.id,
           atMs: now,
           changedFraction: fraction,
-          frame: Buffer.from(frame), // copy — the consumer owns it
         });
       }
     } else {

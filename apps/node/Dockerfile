@@ -37,6 +37,10 @@ COPY apps/node ./apps/node
 # Dev deps included on purpose: the app runs TS directly via tsx.
 RUN pnpm install --filter @nightjar/node... --prod=false
 
+# YOLOX-tiny ONNX weights (Apache-2.0, official Megvii release) — gitignored,
+# so the image must fetch them at build time for the detect worker.
+RUN pnpm --filter @nightjar/node fetch-model
+
 ENV NODE_ENV=production
 # Local UI/API (compose runs with network_mode: host).
 EXPOSE 8080
