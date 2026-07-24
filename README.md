@@ -7,9 +7,10 @@ Nightjar is a self-hosted alternative to Google Nest Aware and Blue Iris:
 - **Your footage stays home.** 24/7 recording goes to your own disk. Only event clips you opt into ever reach the cloud.
 - **Zero port forwarding.** The node keeps a single outbound connection; remote live view flows peer-to-peer over WebRTC.
 - **AI on your hardware.** Person / vehicle / animal / package detection runs locally — no per-camera cloud inference fees.
-- **Works with open cameras.** Anything that speaks RTSP/ONVIF (Reolink, Amcrest, Hikvision, Dahua, Ubiquiti, …). A Nest camera bridge (Google Smart Device Management API) is on the roadmap.
+- **Works with open cameras.** Anything that speaks RTSP/ONVIF (Reolink, Amcrest, Hikvision, Dahua, Ubiquiti, …) — plus Nest cameras via the experimental SDM bridge.
+- **Your cloud, your choice.** Event clips can back up to your own Google Drive (more providers coming) — Nightjar can only see files it creates.
 
-**Documentation: [night-jar.mintlify.app](https://docs.nightjar.ca)** — including a step-by-step [Nest → Nightjar migration guide](https://docs.nightjar.ca/guides/nest-migration).
+**Documentation: [docs.nightjar.ca](https://docs.nightjar.ca)** — including a step-by-step [Nest → Nightjar migration guide](https://docs.nightjar.ca/guides/nest-migration).
 
 ## Quick start (self-hosted node)
 
