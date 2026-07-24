@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
 import { CameraPublic, go2rtcStreamName, type CameraConfig } from "@nightjar/shared";
+import type { GdriveBackup } from "../backup/gdrive.js";
 import type { CameraManager } from "../cameras/manager.js";
 import type { CloudLink } from "../cloud/link.js";
 import type { ConfigStore } from "../config/store.js";
@@ -20,6 +21,8 @@ const AddCameraBody = z.object({
   model: z.string().max(80).optional(),
 });
 
+const ToggleBackupBody = z.object({ enabled: z.boolean() });
+
 export interface ApiDeps {
   store: ConfigStore;
   identity: IdentityStore;
@@ -27,6 +30,7 @@ export interface ApiDeps {
   go2rtc: Go2rtcSupervisor;
   link: CloudLink;
   db: NodeDb;
+  gdrive: GdriveBackup;
   version: string;
   log: Logger;
 }
@@ -110,6 +114,44 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
         .code(502)
         .send({ error: `probe failed: ${err instanceof Error ? err.message : String(err)}` });
     }
+  });
+
+  /* ---------- "bring your own cloud" backup (Google Drive) ---------- */
+
+  /**
+   * Backup status: notConfigured (no OAuth client on this build) |
+   * disconnected | connecting {userCode, verificationUrl, expiresAt} |
+   * connected {email, folderName, enabled, queued, quota} | error {message}.
+   */
+  app.get("/api/backup/gdrive", async () => deps.gdrive.getStatus());
+
+  /** Start the OAuth device flow — returns the connecting state to display. */
+  app.post("/api/backup/gdrive/connect", async (_req, reply) => {
+    const status = await deps.gdrive.startConnect();
+    if (status.status === "notConfigured") {
+      return reply
+        .code(409)
+        .send({ error: "Google Drive backup is not configured on this build" });
+    }
+    return status;
+  });
+
+  /** Revoke the Google grant and delete the local token file. */
+  app.post("/api/backup/gdrive/disconnect", async () => {
+    await deps.gdrive.disconnect();
+    return deps.gdrive.getStatus();
+  });
+
+  app.post("/api/backup/gdrive/toggle", async (req, reply) => {
+    const parsed = ToggleBackupBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "expected { enabled: boolean }" });
+    }
+    const backup = deps.store.get().backup;
+    deps.store.update({
+      backup: { ...backup, gdrive: { ...backup.gdrive, enabled: parsed.data.enabled } },
+    });
+    return deps.gdrive.getStatus();
   });
 
   /**

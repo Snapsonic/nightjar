@@ -295,6 +295,186 @@ async function refreshEvents(status) {
   renderEvents(events, cameraNames);
 }
 
+/* ---------------- Google Drive backup ---------------- */
+
+/** True while a backup action (connect/disconnect/toggle) is in flight —
+ *  keeps the poller from rebuilding the card mid-click. */
+let backupBusy = false;
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+async function backupAction(url, body) {
+  backupBusy = true;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((payload && payload.error) || `HTTP ${res.status}`);
+    if (payload) renderBackup(payload);
+  } catch (err) {
+    console.warn("backup action failed:", err);
+  } finally {
+    backupBusy = false;
+  }
+  refreshBackup();
+}
+
+function backupButton(label, onClick, danger) {
+  const button = document.createElement("button");
+  button.type = "button";
+  if (danger) button.className = "danger";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    onClick();
+  });
+  return button;
+}
+
+function renderBackup(backup) {
+  const card = el("backupCard");
+  card.textContent = "";
+
+  if (backup.status === "notConfigured") {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "Google Drive backup is not configured on this build. ";
+    const link = document.createElement("a");
+    link.href = "https://github.com/Snapsonic/nightjar/blob/main/apps/node/README.md#google-drive-backup";
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = "See the node README";
+    p.append(link, " for how to supply your own Google OAuth client.");
+    card.append(p);
+    return;
+  }
+
+  if (backup.status === "disconnected" || backup.status === "error") {
+    if (backup.status === "error") {
+      const err = document.createElement("p");
+      err.className = "error";
+      err.textContent = `Google Drive: ${backup.message || "unknown error"}`;
+      card.append(err);
+    }
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent =
+      "Event clips can also copy to your own Google Drive. " +
+      "Nightjar can only see files it creates — never the rest of your Drive.";
+    const row = document.createElement("div");
+    row.className = "form-row";
+    row.append(
+      backupButton(backup.status === "error" ? "Try again" : "Connect Google Drive", () =>
+        backupAction("/api/backup/gdrive/connect"),
+      ),
+    );
+    card.append(p, row);
+    return;
+  }
+
+  if (backup.status === "connecting") {
+    const h = document.createElement("p");
+    h.className = "hint";
+    const strong = document.createElement("strong");
+    strong.textContent = (backup.verificationUrl || "https://google.com/device").replace(
+      /^https?:\/\//,
+      "",
+    );
+    h.append("On any device, go to ", strong, " and enter this code:");
+    const code = document.createElement("div");
+    code.className = "claim-code";
+    code.textContent = backup.userCode || "————";
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    if (backup.expiresAt) {
+      hint.textContent = `Code expires at ${new Date(backup.expiresAt).toLocaleTimeString()}.`;
+    }
+    card.append(h, code, hint);
+    return;
+  }
+
+  if (backup.status === "connected") {
+    const rows = document.createElement("dl");
+    rows.className = "backup-rows";
+    const addRow = (label, value) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      rows.append(dt, dd);
+    };
+    addRow("Account", backup.email || "—");
+    if (backup.quota) {
+      addRow(
+        "Drive usage",
+        backup.quota.limitBytes === null
+          ? `${formatBytes(backup.quota.usageBytes)} used`
+          : `${formatBytes(backup.quota.usageBytes)} of ${formatBytes(backup.quota.limitBytes)} used`,
+      );
+    }
+    addRow("Folder", backup.folderName || "Nightjar");
+    addRow("Queued clips", String(backup.queued ?? 0));
+
+    const toggle = document.createElement("label");
+    toggle.className = "backup-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = !!backup.enabled;
+    checkbox.addEventListener("change", () => {
+      checkbox.disabled = true;
+      backupAction("/api/backup/gdrive/toggle", { enabled: checkbox.checked });
+    });
+    toggle.append(checkbox, " Back up new event clips to Drive");
+
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = "Nightjar can only see files it creates — never the rest of your Drive.";
+
+    const row = document.createElement("div");
+    row.className = "form-row";
+    row.append(
+      backupButton(
+        "Disconnect",
+        () => {
+          if (confirm("Disconnect Google Drive? Already-backed-up clips stay in your Drive.")) {
+            backupAction("/api/backup/gdrive/disconnect");
+          } else {
+            refreshBackup();
+          }
+        },
+        true,
+      ),
+    );
+    card.append(rows, toggle, note, row);
+  }
+}
+
+async function refreshBackup() {
+  if (backupBusy) return;
+  let backup;
+  try {
+    const res = await fetch("/api/backup/gdrive");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    backup = await res.json();
+  } catch {
+    return; // keep the previous card on transient errors
+  }
+  if (!backupBusy) renderBackup(backup);
+}
+
 /* ---------------- status polling ---------------- */
 
 async function refresh() {
@@ -312,6 +492,7 @@ async function refresh() {
   renderPairing(status);
   renderCameras(status);
   refreshEvents(status);
+  refreshBackup();
 }
 
 /* ---------------- add-camera form ---------------- */

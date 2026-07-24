@@ -13,12 +13,30 @@ export const CloudConfig = z.object({
   supabaseAnonKey: z.string().optional(),
 });
 
+/**
+ * "Bring your own cloud" backup. Google Drive first: event clips + thumbnails
+ * are copied into the user's own Drive under `folderName`. clientId/clientSecret
+ * override the NIGHTJAR_GOOGLE_CLIENT_ID/SECRET env vars for self-hosters who
+ * supply their own OAuth client.
+ */
+export const BackupConfig = z.object({
+  gdrive: z
+    .object({
+      enabled: z.boolean().default(false),
+      folderName: z.string().min(1).max(80).default("Nightjar"),
+      clientId: z.string().optional(),
+      clientSecret: z.string().optional(),
+    })
+    .default({}),
+});
+
 export const NodeConfig = z.object({
   version: z.literal(1).default(1),
   nodeName: z.string().min(1).max(80).default("nightjar-node"),
   cameras: z.array(CameraConfig).default([]),
   retention: RetentionConfig.default({}),
   cloud: CloudConfig.default({}),
+  backup: BackupConfig.default({}),
   go2rtc: z
     .object({
       apiUrl: z.string().url().default("http://127.0.0.1:1984"),

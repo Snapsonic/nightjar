@@ -22,6 +22,10 @@ services:
       # Points the node at the Nightjar cloud (leave defaults for nightjar.ca).
       NIGHTJAR_SUPABASE_URL: ${NIGHTJAR_SUPABASE_URL:-}
       NIGHTJAR_SUPABASE_ANON_KEY: ${NIGHTJAR_SUPABASE_ANON_KEY:-}
+      # Optional: Google OAuth client for "your cloud" Drive backup
+      # (see apps/node/README.md#google-drive-backup)
+      NIGHTJAR_GOOGLE_CLIENT_ID: ${NIGHTJAR_GOOGLE_CLIENT_ID:-}
+      NIGHTJAR_GOOGLE_CLIENT_SECRET: ${NIGHTJAR_GOOGLE_CLIENT_SECRET:-}
       GO2RTC_CONFIG_DIR: /go2rtc-config
     volumes:
       - ./data/config:/config

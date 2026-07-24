@@ -1,4 +1,5 @@
 import { startApiServer } from "./api/server.js";
+import { GdriveBackup } from "./backup/gdrive.js";
 import { CameraManager } from "./cameras/manager.js";
 import { CloudLink } from "./cloud/link.js";
 import { IdentityStore } from "./config/identity.js";
@@ -43,12 +44,17 @@ async function main(): Promise<void> {
   });
   link.start();
 
+  // Optional user-owned Google Drive backup (device flow, drive.file scope).
+  const gdrive = new GdriveBackup({ db, store, log: log.child("gdrive") });
+  gdrive.start();
+
   const pipeline = new EventPipeline({
     db,
     link,
     recorder,
     detect,
     store,
+    gdrive,
     log: log.child("events"),
   });
   pipeline.attach(motion);
@@ -60,6 +66,7 @@ async function main(): Promise<void> {
     go2rtc,
     link,
     db,
+    gdrive,
     version: VERSION,
     log: log.child("api"),
   });
@@ -75,7 +82,7 @@ async function main(): Promise<void> {
         motion.stopAll();
         recorder.stopAll();
         go2rtc.stop();
-        await Promise.allSettled([api.close(), link.stop(), detect.close()]);
+        await Promise.allSettled([api.close(), link.stop(), detect.close(), gdrive.stop()]);
         db.close();
         log.info("shutdown complete");
         process.exit(0);

@@ -19,6 +19,14 @@ export interface UploadQueueRow {
   created_at: number;
 }
 
+export interface GdriveQueueRow {
+  id: number;
+  event_id: string;
+  file: string;
+  attempts: number;
+  created_at: number;
+}
+
 export interface EventRow {
   id: string;
   camera_id: string;
@@ -84,6 +92,27 @@ export class NodeDb {
         );
       `);
       this.db.pragma("user_version = 1");
+    }
+    if (version < 2) {
+      this.db.exec(`
+        -- Serial Google Drive backup queue — mirrors upload_queue semantics.
+        -- An event's clip dir may sit in both queues; it is deleted only when
+        -- neither queue references the event any more (see clipReferenced).
+        CREATE TABLE IF NOT EXISTS gdrive_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_id TEXT NOT NULL,
+          file TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL
+        );
+
+        -- Drive folder-id cache; cache_key is "<parentId>/<name>".
+        CREATE TABLE IF NOT EXISTS gdrive_folders (
+          cache_key TEXT PRIMARY KEY,
+          folder_id TEXT NOT NULL
+        );
+      `);
+      this.db.pragma("user_version = 2");
     }
   }
 
@@ -196,6 +225,80 @@ export class NodeDb {
       .all(max) as UploadQueueRow[];
     for (const row of dropped) this.deleteUpload(row.id);
     return dropped;
+  }
+
+  /* ---------- Google Drive backup queue (mirrors upload_queue) ---------- */
+
+  enqueueGdrive(eventId: string, file: string): void {
+    this.db
+      .prepare("INSERT INTO gdrive_queue (event_id, file, created_at) VALUES (?, ?, ?)")
+      .run(eventId, file, Date.now());
+  }
+
+  /** Oldest pending Drive backup job, or undefined when the queue is empty. */
+  nextGdrive(): GdriveQueueRow | undefined {
+    return this.db
+      .prepare(
+        "SELECT id, event_id, file, attempts, created_at FROM gdrive_queue ORDER BY id ASC LIMIT 1",
+      )
+      .get() as GdriveQueueRow | undefined;
+  }
+
+  bumpGdriveAttempts(id: number): void {
+    this.db.prepare("UPDATE gdrive_queue SET attempts = attempts + 1 WHERE id = ?").run(id);
+  }
+
+  deleteGdrive(id: number): void {
+    this.db.prepare("DELETE FROM gdrive_queue WHERE id = ?").run(id);
+  }
+
+  countGdriveQueue(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM gdrive_queue").get() as { n: number };
+    return row.n;
+  }
+
+  /** Drop the oldest jobs beyond `max`, returning the dropped rows (caller cleans files). */
+  trimGdriveQueue(max: number): GdriveQueueRow[] {
+    const dropped = this.db
+      .prepare(
+        `SELECT id, event_id, file, attempts, created_at FROM gdrive_queue
+         ORDER BY id DESC LIMIT -1 OFFSET ?`,
+      )
+      .all(max) as GdriveQueueRow[];
+    for (const row of dropped) this.deleteGdrive(row.id);
+    return dropped;
+  }
+
+  /**
+   * True while any queue (cloud upload or Drive backup) still references the
+   * event — the shared clip dir under .clips/<eventId>/ must not be deleted
+   * until this returns false.
+   */
+  clipReferenced(eventId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT EXISTS(SELECT 1 FROM upload_queue WHERE event_id = ?) +
+                EXISTS(SELECT 1 FROM gdrive_queue WHERE event_id = ?) AS refs`,
+      )
+      .get(eventId, eventId) as { refs: number };
+    return row.refs > 0;
+  }
+
+  getGdriveFolder(cacheKey: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT folder_id FROM gdrive_folders WHERE cache_key = ?")
+      .get(cacheKey) as { folder_id: string } | undefined;
+    return row?.folder_id;
+  }
+
+  setGdriveFolder(cacheKey: string, folderId: string): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO gdrive_folders (cache_key, folder_id) VALUES (?, ?)")
+      .run(cacheKey, folderId);
+  }
+
+  clearGdriveFolders(): void {
+    this.db.prepare("DELETE FROM gdrive_folders").run();
   }
 
   getEvent(eventId: string): EventRow | undefined {

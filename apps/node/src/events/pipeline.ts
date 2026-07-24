@@ -10,6 +10,7 @@ import {
   type NvrEvent,
 } from "@nightjar/shared";
 import type { Json } from "@nightjar/db";
+import type { GdriveBackup } from "../backup/gdrive.js";
 import type { CloudLink } from "../cloud/link.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
@@ -66,6 +67,8 @@ export interface EventPipelineDeps {
   recorder: Recorder;
   detect: DetectWorker;
   store: ConfigStore;
+  /** Optional "bring your own cloud" backup — enqueues alongside the cloud upload. */
+  gdrive?: GdriveBackup;
   log: Logger;
 }
 
@@ -272,8 +275,15 @@ export class EventPipeline {
 
     if (hasClip) {
       this.deps.db.enqueueUpload(event.id, dir);
+      // Google Drive backup shares the same clip dir via its own queue —
+      // enqueued only when enabled+connected right now (forward-only).
+      this.deps.gdrive?.enqueueIfActive(event.id, dir);
       for (const dropped of this.deps.db.trimUploadQueue(MAX_QUEUED_UPLOADS)) {
-        rmSync(dropped.file, { recursive: true, force: true });
+        // The Drive queue may still need the clip files — delete only when
+        // no queue references the event any more.
+        if (!this.deps.db.clipReferenced(dropped.event_id)) {
+          rmSync(dropped.file, { recursive: true, force: true });
+        }
         this.deps.log.warn(`upload queue full — dropped event ${dropped.event_id}`);
       }
       this.kickUploader();
@@ -345,7 +355,11 @@ export class EventPipeline {
       try {
         await this.uploadEvent(job.event_id, job.file);
         this.deps.db.deleteUpload(job.id);
-        rmSync(job.file, { recursive: true, force: true });
+        // The clip dir is shared with the Google Drive backup queue — delete
+        // it only once neither queue references the event.
+        if (!this.deps.db.clipReferenced(job.event_id)) {
+          rmSync(job.file, { recursive: true, force: true });
+        }
         this.deps.log.info(`event ${job.event_id} uploaded`);
       } catch (err) {
         this.deps.db.bumpUploadAttempts(job.id);

@@ -63,6 +63,7 @@ Production runs via `docker/docker-compose.yml` at the repo root.
 | `src/motion/detector.ts` | real | 5 fps substream grayscale frame-diff vs rolling background; motionStart/motionEnd events |
 | `src/detect/worker.ts` | real | worker_thread pool-of-1 running YOLOX-tiny via onnxruntime-node on go2rtc JPEG snapshots (see "Object detection") |
 | `src/events/pipeline.ts` | real | motion → event → clip + thumbnail → local row → serial upload queue (offline-safe, bounded) |
+| `src/backup/gdrive.ts` | real | Google Drive "bring your own cloud" backup: device-flow OAuth (drive.file scope), token refresh, resumable uploads, own serial queue (see "Google Drive backup") |
 | `ui/` | real | Vanilla-JS local admin UI (no build step), camera grid + recent events |
 
 ## Object detection
@@ -97,6 +98,62 @@ COCO classes is an approximation — a dedicated package-detection model comes
 later. Thresholds (conf 0.35, NMS IoU 0.45, pipeline min score 0.5) are
 constants in `src/detect/inference-worker.ts` / `src/events/pipeline.ts`, not
 NodeConfig.
+
+## Google Drive backup
+
+"Bring your own cloud": in addition to the Nightjar cloud upload, the node
+can copy every event clip + thumbnail into **your own Google Drive**, under
+`<folderName>/<camera name>/<YYYY-MM-DD>/<HHmmss>-<kind>.mp4` (+ `.jpg`).
+Configure it from the local UI's "Your cloud backup" card.
+
+How it works:
+
+- **Auth is the OAuth 2.0 Device Flow** ("TV and Limited-Input Device"
+  client): the node shows a short code, you enter it at
+  <https://google.com/device> on any device, and the node polls Google for
+  the grant. No browser, redirect URI or inbound port on the node.
+- **Scope is `drive.file` only** — the node can see and manage *only files
+  and folders it created itself*. It deliberately cannot read, list or touch
+  anything else in your Drive.
+- **Tokens never leave the node.** They live in
+  `${CONFIG_DIR}/gdrive-token.json` (mode 0600, like `identity.json`) and are
+  never logged. "Disconnect" revokes the grant at Google and deletes the
+  file; clips already in your Drive stay there.
+- Uploads run from their own serial queue (`gdrive_queue` in SQLite —
+  survives restarts, exponential backoff 5s→5min, bounded to the newest
+  500). Backup is **forward-only**: only events closed while backup is
+  enabled and connected are uploaded; nothing is backfilled retroactively.
+  Clip files are shared with the cloud upload queue and are deleted only
+  once *both* queues are done with the event.
+
+Config (`config.json`, all optional): `backup.gdrive.enabled` (default
+false, toggled from the UI), `backup.gdrive.folderName` (default
+`"Nightjar"`), `backup.gdrive.clientId` / `backup.gdrive.clientSecret`
+(overrides for the env vars below).
+
+**Supplying an OAuth client (self-hosters).** Google requires an OAuth
+client to run the device flow; official builds ship credentials via env, and
+without any the UI shows the feature as "not configured on this build". To
+create your own:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create
+   (or pick) a project and enable the **Google Drive API**.
+2. **APIs & Services → OAuth consent screen**: user type **External**, fill
+   in the app name/email, add the scope
+   `https://www.googleapis.com/auth/drive.file`, then **publish** the app
+   (while in "Testing", refresh tokens expire after 7 days).
+3. **APIs & Services → Credentials → Create credentials → OAuth client
+   ID**, application type **"TVs and Limited Input devices"**.
+4. Pass the resulting client ID/secret to the node:
+
+```sh
+NIGHTJAR_GOOGLE_CLIENT_ID=<client id> \
+NIGHTJAR_GOOGLE_CLIENT_SECRET=<client secret> \
+pnpm --filter @nightjar/node dev
+```
+
+(For device-flow clients the "secret" is not actually confidential — Google
+issues it knowing it ships on devices — but treat it with care anyway.)
 
 ## Notes
 
