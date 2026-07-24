@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial,
+    sans-serif;
+
+  /* Charcoal night scale */
+  --color-night-950: #060709;
+  --color-night-900: #0b0c0f;
+  --color-night-850: #0f1115;
+  --color-night-800: #14161b;
+  --color-night-700: #1b1e25;
+  --color-night-600: #262a33;
+  --color-night-500: #384050;
+
+  /* Warm fog (text) scale */
+  --color-fog-500: #6d7380;
+  --color-fog-400: #8a909c;
+  --color-fog-300: #adb2bc;
+  --color-fog-200: #cdd0d6;
+  --color-fog-100: #edebe5;
+
+  /* Ember — the nightjar's eye */
+  --color-ember-200: #fadd9e;
+  --color-ember-300: #f7c766;
+  --color-ember-400: #f0ab3c;
+  --color-ember-500: #dd9124;
+  --color-ember-600: #b06f14;
+
+  --color-online: #4ade80;
+  --color-danger: #f4746c;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-night-900);
+  color: var(--color-fog-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: color-mix(in srgb, var(--color-ember-400) 30%, transparent);
+}
+
+/* Subtle vignette so panels read against the background */
+.app-bg {
+  background:
+    radial-gradient(
+      1200px 500px at 70% -10%,
+      color-mix(in srgb, var(--color-ember-500) 5%, transparent),
+      transparent 70%
+    ),
+    var(--color-night-900);
+}

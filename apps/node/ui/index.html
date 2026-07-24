@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nightjar</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◗</span>
+      <h1>Nightjar</h1>
+    </div>
+    <div class="node-status">
+      <span id="statusDot" class="dot dot-unknown"></span>
+      <span id="statusText">connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="pairing" class="card pairing hidden">
+      <!-- filled by app.js -->
+    </section>
+
+    <section class="section-head">
+      <h2>Cameras</h2>
+    </section>
+    <section id="cameraGrid" class="grid"></section>
+    <p id="noCameras" class="empty hidden">No cameras yet — add one below.</p>
+
+    <section class="card add-camera">
+      <h2>Add camera</h2>
+      <form id="addCameraForm" autocomplete="off">
+        <label>
+          Name
+          <input name="name" type="text" required maxlength="80" placeholder="Front door" />
+        </label>
+        <label>
+          RTSP URL
+          <input name="rtspUrl" type="url" required placeholder="rtsp://user:pass@192.168.1.10:554/stream1" />
+        </label>
+        <label>
+          Substream URL <span class="muted">(optional, low-res)</span>
+          <input name="rtspSubUrl" type="url" placeholder="rtsp://user:pass@192.168.1.10:554/stream2" />
+        </label>
+        <div class="form-row">
+          <button type="submit" id="addCameraButton">Add camera</button>
+          <span id="addCameraError" class="error"></span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <span id="footerMeta"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "@nightjar/web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nightjar/db": "workspace:*",
+    "@nightjar/shared": "workspace:*",
+    "@supabase/ssr": "^0.12.3",
+    "@supabase/supabase-js": "^2.49.0",
+    "next": "^15.3.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.4",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "tailwindcss": "^4.1.4",
+    "typescript": "^5.7.3"
+  }
+}

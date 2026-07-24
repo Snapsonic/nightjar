@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CameraConfig } from "./camera.js";
+import { CameraConfig } from "./camera";
 
 export const RetentionConfig = z.object({
   maxDays: z.number().int().min(1).max(365).default(14),

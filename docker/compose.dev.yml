@@ -1,0 +1,13 @@
+# Dev-loop compose: runs only go2rtc; run the node service on the host with
+#   GO2RTC_CONFIG_DIR=./docker/data/go2rtc CONFIG_DIR=./docker/data/config \
+#   DB_DIR=./docker/data/db pnpm --filter @nightjar/node dev
+services:
+  go2rtc:
+    image: alexxit/go2rtc:1.9.10
+    restart: unless-stopped
+    ports:
+      - "1984:1984"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    volumes:
+      - ./data/go2rtc:/config

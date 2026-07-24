@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+@theme {
+  /* Night sky — deep charcoal-indigo, never pure black */
+  --color-night-950: #0a0c13;
+  --color-night-900: #0e111b;
+  --color-night-850: #121626;
+  --color-night-800: #171c2e;
+  --color-night-700: #242b45;
+
+  /* Hairlines */
+  --color-line: #212739;
+
+  /* Warm, slightly parchment inks */
+  --color-ink-100: #ece9e1;
+  --color-ink-300: #b6b8c4;
+  --color-ink-500: #868a9f;
+  --color-ink-600: #676b80;
+
+  /* Ember — the nightjar's eye-shine. The only accent. */
+  --color-ember-300: #ffd9a1;
+  --color-ember-400: #ffc172;
+  --color-ember-500: #f0a441;
+  --color-ember-600: #c07c22;
+
+  --font-sans:
+    var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    /* Anchor targets clear the sticky nav */
+    scroll-padding-top: 5.5rem;
+  }
+
+  body {
+    background-color: var(--color-night-950);
+    color: var(--color-ink-300);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: var(--color-ember-500);
+    color: var(--color-night-950);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ember-500);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* Small-caps mono section label, e.g. "01 — why nightjar" */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--color-ember-500);
+  }
+
+  /* FAQ accordion: animatable height without JS measurement */
+  .faq-panel {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 240ms ease;
+  }
+  .faq-panel[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+  .faq-panel > div {
+    overflow: hidden;
+    visibility: hidden;
+    transition: visibility 240ms;
+  }
+  .faq-panel[data-open="true"] > div {
+    visibility: visible;
+  }
+}
+
+/* Restrained motion — all CSS, all disabled by prefers-reduced-motion above */
+
+/* The eye-shine in the hero scene: a slow, watchful blink */
+@keyframes eyeshine {
+  0%,
+  88%,
+  100% {
+    opacity: 1;
+  }
+  92%,
+  96% {
+    opacity: 0.15;
+  }
+}
+.animate-eyeshine {
+  animation: eyeshine 7s ease-in-out infinite;
+}
+.animate-eyeshine-late {
+  animation: eyeshine 7s ease-in-out 3.5s infinite;
+}
+
+/* Recording indicator */
+@keyframes rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.animate-rec {
+  animation: rec-pulse 2.4s ease-in-out infinite;
+}
+
+/* Gentle entrance for the hero copy */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-rise {
+  animation: rise 600ms ease-out both;
+}
+.animate-rise-1 {
+  animation: rise 600ms ease-out 80ms both;
+}
+.animate-rise-2 {
+  animation: rise 600ms ease-out 160ms both;
+}

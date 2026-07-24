@@ -13,6 +13,7 @@ out/
 .env
 .env.*
 !.env.example
+.supabase-db-password
 
 # vercel / supabase local state
 .vercel/
