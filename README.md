@@ -9,7 +9,7 @@ Nightjar is a self-hosted alternative to Google Nest Aware and Blue Iris:
 - **AI on your hardware.** Person / vehicle / animal / package detection runs locally — no per-camera cloud inference fees.
 - **Works with open cameras.** Anything that speaks RTSP/ONVIF (Reolink, Amcrest, Hikvision, Dahua, Ubiquiti, …). A Nest camera bridge (Google Smart Device Management API) is on the roadmap.
 
-**Documentation: [night-jar.mintlify.app](https://night-jar.mintlify.app)** — including a step-by-step [Nest → Nightjar migration guide](https://night-jar.mintlify.app/guides/nest-migration).
+**Documentation: [night-jar.mintlify.app](https://docs.nightjar.ca)** — including a step-by-step [Nest → Nightjar migration guide](https://docs.nightjar.ca/guides/nest-migration).
 
 ## Quick start (self-hosted node)
 
