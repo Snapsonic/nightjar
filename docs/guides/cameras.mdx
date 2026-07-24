@@ -62,6 +62,32 @@ Add both URLs when your camera has them.
 
 If no substream is configured, motion detection falls back to decoding the main stream. It works, but on small hardware (Pi 5 with several cameras) the substream is the difference between comfortable and struggling.
 
+## Nest cameras (experimental SDM bridge)
+
+Nest cameras do not expose RTSP, but Nightjar can bridge them through Google's Smart Device Management (SDM) API: the node hands the stream to go2rtc's native `nest:` source, and from there the camera behaves like any other — recording, motion, AI events, clips, and live view all work unchanged.
+
+<Warning>
+This is **experimental**, and honest caveats apply: it works with 2021-and-newer Nest cams (WebRTC) and some older models that expose RTSP via SDM; battery cameras that sleep cannot stream continuously; the video still transits Google's servers; and Google charges a one-time $5 Device Access registration fee. If you want rock-solid, an RTSP hardware swap is still the sturdier choice — see the [Nest migration guide](/guides/nest-migration).
+</Warning>
+
+Setup is done from the local UI's **"Nest cameras"** card, entirely per-node (no environment variables):
+
+<Steps>
+  <Step title="Google-side prerequisites (one time)">
+    1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project, enable the **Smart Device Management API**, and publish an **External** OAuth consent screen.
+    2. Create an OAuth client of type **"Web application"** with `https://www.google.com` as an authorized redirect URI.
+    3. Register for [Device Access](https://console.nest.google.com/device-access) ($5 one-time), create a Device Access project using that OAuth client ID, and copy the Device Access **project ID**.
+  </Step>
+  <Step title="Enter credentials and connect">
+    Enter the project ID, client ID, and client secret in the card, then click **Connect Google account**. Approve the consent screens, land on google.com, and paste the full URL from the address bar back into the card. The refresh token is stored on the node only (`nest-token.json`, mode 0600).
+  </Step>
+  <Step title="Link devices and add cameras">
+    If the device list comes back empty, complete the Partner Connections Manager link flow (the card links it) and refresh. Then use **Add as camera** next to each device.
+  </Step>
+</Steps>
+
+Nest cameras have no substream, so motion detection reads the main stream, and probing/capabilities come from SDM device traits rather than ffprobe. Full walkthrough with screenshots-level detail: the [node README](https://github.com/Snapsonic/nightjar/blob/main/apps/node/README.md#nest-cameras-sdm-bridge).
+
 ## Current limitations
 
 <AccordionGroup>

@@ -30,6 +30,22 @@ export const BackupConfig = z.object({
     .default({}),
 });
 
+/**
+ * Node-level credentials for the Nest (Google Smart Device Management) camera
+ * bridge: the user's own Device Access project id plus a standard "Web
+ * application" OAuth client (authorization-code flow — SDM's sdm.service
+ * scope does not support the device flow gdrive uses). All optional and
+ * additive: configs without this block keep parsing. The refresh token
+ * obtained by the connect wizard lives in ${CONFIG_DIR}/nest-token.json
+ * (mode 0600), never in this file.
+ */
+export const NestConfig = z.object({
+  /** Device Access project id (console.nest.google.com/device-access). */
+  projectId: z.string().optional(),
+  clientId: z.string().optional(),
+  clientSecret: z.string().optional(),
+});
+
 export const NodeConfig = z.object({
   version: z.literal(1).default(1),
   nodeName: z.string().min(1).max(80).default("nightjar-node"),
@@ -37,6 +53,7 @@ export const NodeConfig = z.object({
   retention: RetentionConfig.default({}),
   cloud: CloudConfig.default({}),
   backup: BackupConfig.default({}),
+  nest: NestConfig.default({}),
   go2rtc: z
     .object({
       apiUrl: z.string().url().default("http://127.0.0.1:1984"),

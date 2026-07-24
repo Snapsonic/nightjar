@@ -45,6 +45,18 @@ The node's configuration lives in `config.json` inside the config directory (`/c
 
 If no URL/key is available from config or environment, the cloud link simply stays disabled — the node runs local-only.
 
+### `nest`
+
+Credentials for the experimental [Nest camera bridge](/guides/cameras#nest-cameras-experimental-sdm-bridge) (Google Smart Device Management). All optional; normally filled in from the local UI's "Nest cameras" card. The block is additive — existing configs without it keep parsing.
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `projectId` | string | — | Device Access project ID (console.nest.google.com/device-access) |
+| `clientId` | string | — | Your own Google OAuth "Web application" client |
+| `clientSecret` | string | — | Its secret |
+
+The OAuth refresh token itself is **not** in `config.json` — it lives in `${CONFIG_DIR}/nest-token.json` (mode 0600), written when you complete the connect flow in the UI.
+
 ### `go2rtc`
 
 | Field | Type | Default | Notes |
@@ -67,8 +79,10 @@ Cameras are normally added through the UI or [API](/reference/node-api), but the
 | `id` | UUID | — | Generated on add |
 | `name` | string (1–80) | — | Display name |
 | `make`, `model` | string | — | Optional labels |
-| `rtspUrl` | URL | — | Main stream. May embed credentials — never leaves the node |
-| `rtspSubUrl` | URL | — | Optional substream, used for motion detection and low-bandwidth live view |
+| `source` | `"rtsp"` \| `"nest"` | `"rtsp"` | Where the video comes from. Existing configs (no field) parse as `"rtsp"` |
+| `rtspUrl` | URL | — | Main stream. Required when `source` is `"rtsp"`. May embed credentials — never leaves the node |
+| `rtspSubUrl` | URL | — | Optional substream, used for motion detection and low-bandwidth live view (RTSP cameras only) |
+| `nest.deviceId` | string | — | SDM device id. Required when `source` is `"nest"` |
 | `enabled` | boolean | `true` | Master switch |
 | `record` | boolean | `true` | 24/7 recording |
 | `detect` | boolean | `true` | Motion detection and AI events |

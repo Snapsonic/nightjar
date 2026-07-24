@@ -10,6 +10,7 @@ import { EventPipeline } from "./events/pipeline.js";
 import { Go2rtcSupervisor } from "./go2rtc/supervisor.js";
 import { createLogger } from "./log.js";
 import { MotionDetector } from "./motion/detector.js";
+import { NestBridge } from "./nest/sdm.js";
 import { Recorder } from "./recorder/recorder.js";
 
 const VERSION = "0.1.0";
@@ -22,8 +23,15 @@ async function main(): Promise<void> {
   const identity = new IdentityStore(log.child("identity"));
   const db = new NodeDb();
 
-  const go2rtc = new Go2rtcSupervisor(store, log.child("go2rtc"));
+  // Nest camera bridge (Google SDM) — supplies the params go2rtc's `nest:`
+  // source lines need; re-renders go2rtc.yaml on connect/disconnect.
+  const nest = new NestBridge({ store, log: log.child("nest") });
+
+  const go2rtc = new Go2rtcSupervisor(store, log.child("go2rtc"), undefined, () =>
+    nest.getStreamParams(),
+  );
   await go2rtc.start();
+  nest.onChange(() => void go2rtc.resync());
 
   const cameras = new CameraManager(store, log.child("cameras"));
 
@@ -67,6 +75,7 @@ async function main(): Promise<void> {
     link,
     db,
     gdrive,
+    nest,
     version: VERSION,
     log: log.child("api"),
   });

@@ -54,7 +54,9 @@ Production runs via `docker/docker-compose.yml` at the repo root.
 | `src/main.ts` | real | Wires everything; graceful shutdown |
 | `src/config/store.ts` | real | `config.json` (NodeConfig) with atomic writes + change events |
 | `src/config/identity.ts` | real | `identity.json` — node secret (first boot) + nodeId (after register) |
-| `src/cameras/manager.ts` | real | Camera CRUD + ffprobe capability probing |
+| `src/cameras/manager.ts` | real | Camera CRUD + ffprobe capability probing (skipped for Nest cameras) |
+| `src/cameras/streams.ts` | real | Capture-URL selection: direct RTSP, or go2rtc's :8554 restream for Nest cameras |
+| `src/nest/sdm.ts` | real | Nest camera bridge: SDM OAuth (paste-back code flow), token refresh, devices.list (see "Nest cameras") |
 | `src/go2rtc/supervisor.ts` | real | Renders `go2rtc.yaml`, pokes `/api/restart`, health/stream checks |
 | `src/cloud/link.ts` | real | Register → claim poll → realtime channel; WHEP/snapshot/status handlers, heartbeat, camera sync |
 | `src/api/server.ts` | real | Local REST API + WHEP proxy + static UI |
@@ -154,6 +156,82 @@ pnpm --filter @nightjar/node dev
 
 (For device-flow clients the "secret" is not actually confidential — Google
 issues it knowing it ships on devices — but treat it with care anyway.)
+
+## Nest cameras (SDM bridge)
+
+**Experimental.** Nest cameras don't speak RTSP, but Google's Smart Device
+Management (SDM) API can hand their live stream to go2rtc's native `nest:`
+source. Once added, a Nest camera is an ordinary Nightjar camera: recording,
+motion detection, AI events, clips and live view all work unchanged — the
+recorder and motion detector simply pull the stream back out of go2rtc's RTSP
+restream (`:8554`) instead of talking to the camera directly.
+
+Honest caveats up front:
+
+- Works with 2021-and-newer Nest cams (WebRTC live stream) and some older
+  models that expose an RTSP live stream through SDM. Battery cameras sleep
+  and cannot stream continuously.
+- The video still transits Google's servers — this is a bridge, not a local
+  stream.
+- Google charges a **one-time $5** Device Access registration fee.
+- Everything is per-node config — no env vars, no Nightjar-supplied OAuth
+  client. You bring your own Google Cloud project (Google requires the
+  per-user Device Access registration anyway).
+
+### One-time Google-side setup
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create
+   (or pick) a project and enable the **Smart Device Management API**
+   (`smartdevicemanagement.googleapis.com`).
+2. **APIs & Services → OAuth consent screen**: user type **External**, fill in
+   app name/email, then **publish** the app (in "Testing", refresh tokens
+   expire after 7 days and your cameras would go offline weekly).
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**,
+   application type **"Web application"**, and add
+   `https://www.google.com` as an **authorized redirect URI**. Note the client
+   ID and secret. (The node has no public URL, so the flow "redirects" to
+   google.com and you paste the resulting URL back — see below.)
+4. Register for **Device Access** at
+   <https://console.nest.google.com/device-access> ($5 one-time, same Google
+   account that owns the cameras), create a Device Access **project** with
+   your OAuth client ID from step 3, and copy the Device Access **project
+   ID** (a UUID — not the GCP project id).
+
+### Connecting the node
+
+In the local UI's **"Nest cameras"** card:
+
+1. Enter the Device Access project ID + OAuth client ID/secret (persisted to
+   `config.json` under `nest.*`).
+2. Click **Connect Google account** — the node builds a consent URL
+   (scope `sdm.service`, `access_type=offline`, `prompt=consent`). Open it,
+   sign in, approve. During consent Google shows the Nest permission screens;
+   pick the cameras you want to allow.
+3. You land on `https://www.google.com/?code=…`. Copy the **full URL** from
+   the address bar and paste it into the card ("just the code" also works).
+   The node exchanges it for tokens; the refresh token is stored in
+   `${CONFIG_DIR}/nest-token.json` (mode 0600, like `gdrive-token.json`) and
+   never leaves the node.
+4. The card lists your cameras (SDM `devices.list`, filtered to devices with
+   the `CameraLiveStream` trait). **If the list is empty**, you skipped the
+   Partner Connections link flow: open
+   `https://nestservices.google.com/partnerconnections/<projectId>`, tick your
+   cameras, finish, then "Refresh devices". The UI links this for you.
+5. **Add as camera** — creates a camera with `source: "nest"` and
+   `nest.deviceId`. No ffprobe (the stream only exists once go2rtc pulls it);
+   capabilities come from SDM traits (max resolution/codecs) when available.
+
+The rendered `go2rtc.yaml` then contains lines like
+
+```yaml
+"cam_<id>": "nest:?client_id=…&client_secret=…&refresh_token=…&project_id=…&device_id=…"
+```
+
+which means the go2rtc config file now carries secrets — it is written with
+mode 0600. Nest cameras have no substream; `cam_<id>_sub` points at the same
+source. "Disconnect" revokes the grant at Google and deletes the token file;
+nest cameras stay configured but are skipped in `go2rtc.yaml` (and logged)
+until reconnected.
 
 ## Notes
 

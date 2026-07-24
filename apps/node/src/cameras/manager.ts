@@ -54,10 +54,17 @@ export async function probe(rtspUrl: string): Promise<CameraCapabilities> {
 
 export interface AddCameraInput {
   name: string;
-  rtspUrl: string;
+  /** "rtsp" (default) or "nest" (bridged via go2rtc's native nest source). */
+  source?: "rtsp" | "nest";
+  /** Required when source is "rtsp". */
+  rtspUrl?: string;
   rtspSubUrl?: string;
+  /** Required when source is "nest". */
+  nestDeviceId?: string;
   make?: string;
   model?: string;
+  /** Pre-computed capabilities (e.g. from SDM traits for nest cameras). */
+  capabilities?: CameraCapabilities;
 }
 
 /** CRUD over the cameras array in NodeConfig, persisted via the config store. */
@@ -75,25 +82,40 @@ export class CameraManager {
     return this.list().find((c) => c.id === id);
   }
 
-  /** Add a camera. Probes the RTSP URL but tolerates probe failure. */
+  /** Add a camera. Probes RTSP URLs (tolerating failure); nest cameras skip
+   *  the probe — their stream only exists once go2rtc pulls the nest source. */
   async addCamera(input: AddCameraInput): Promise<CameraConfig> {
-    let capabilities = CameraCapabilities.parse({});
-    try {
-      capabilities = await probe(input.rtspUrl);
-    } catch (err) {
-      this.log.warn(
-        `probe failed for "${input.name}" — adding with empty capabilities: ${err instanceof Error ? err.message : String(err)}`,
+    const source = input.source ?? "rtsp";
+    let capabilities = input.capabilities ?? CameraCapabilities.parse({});
+    if (source === "rtsp") {
+      if (!input.rtspUrl) throw new Error("rtspUrl is required for RTSP cameras");
+      if (input.capabilities === undefined) {
+        try {
+          capabilities = await probe(input.rtspUrl);
+        } catch (err) {
+          this.log.warn(
+            `probe failed for "${input.name}" — adding with empty capabilities: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      capabilities.hasSubstream = input.rtspSubUrl !== undefined;
+    } else {
+      if (!input.nestDeviceId) throw new Error("nestDeviceId is required for Nest cameras");
+      capabilities.hasSubstream = false;
+      this.log.info(
+        `nest camera "${input.name}" — skipping ffprobe (stream is served by go2rtc's nest source)`,
       );
     }
-    capabilities.hasSubstream = input.rtspSubUrl !== undefined;
 
     const camera = CameraConfig.parse({
       id: randomUUID(),
       name: input.name,
       make: input.make,
       model: input.model,
-      rtspUrl: input.rtspUrl,
-      rtspSubUrl: input.rtspSubUrl,
+      source,
+      rtspUrl: source === "rtsp" ? input.rtspUrl : undefined,
+      rtspSubUrl: source === "rtsp" ? input.rtspSubUrl : undefined,
+      nest: source === "nest" ? { deviceId: input.nestDeviceId as string } : undefined,
       capabilities,
     });
     this.store.update({ cameras: [...this.list(), camera] });
@@ -121,6 +143,9 @@ export class CameraManager {
   async probeCamera(id: string): Promise<CameraCapabilities | undefined> {
     const camera = this.get(id);
     if (!camera) return undefined;
+    if (camera.source !== "rtsp" || !camera.rtspUrl) {
+      throw new Error("probe is only supported for RTSP cameras");
+    }
     const capabilities = await probe(camera.rtspUrl);
     capabilities.hasSubstream = camera.rtspSubUrl !== undefined;
     this.updateCamera(id, { capabilities });

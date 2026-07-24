@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 import type { CameraConfig } from "@nightjar/shared";
+import { captureMainUrl } from "../cameras/streams.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb, SegmentRow } from "../db.js";
 import type { Logger } from "../log.js";
@@ -86,7 +87,7 @@ export class Recorder {
       const camera = wanted.get(cameraId);
       if (!camera) {
         this.stop(cameraId);
-      } else if (camera.rtspUrl !== rec.camera.rtspUrl) {
+      } else if (this.captureUrl(camera) !== this.captureUrl(rec.camera)) {
         this.log.info(`camera ${cameraId} URL changed — restarting capture`);
         this.stop(cameraId);
         this.start(camera);
@@ -153,6 +154,11 @@ export class Recorder {
     return path.join(this.store.get().paths.recordings, cameraId);
   }
 
+  /** Main-stream URL to record — camera RTSP, or go2rtc's restream for nest. */
+  private captureUrl(camera: CameraConfig): string {
+    return captureMainUrl(this.store.get(), camera);
+  }
+
   private spawn(rec: CameraRecording): void {
     if (rec.stopping || this.stopped) return;
     const dir = this.cameraDir(rec.camera.id);
@@ -164,7 +170,7 @@ export class Recorder {
       "-nostdin",
       "-loglevel", "error",
       "-rtsp_transport", "tcp",
-      "-i", rec.camera.rtspUrl,
+      "-i", this.captureUrl(rec.camera),
       "-c", "copy",
       "-map", "0",
       "-f", "segment",

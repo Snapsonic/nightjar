@@ -230,3 +230,26 @@ footer {
   text-align: center;
   padding: 1rem 0 2rem;
 }
+
+/* Nest cameras (SDM bridge) */
+.nest-card form { margin-top: 0.5rem; }
+.nest-prereqs {
+  margin: 0 0 1rem;
+  padding-left: 1.2rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.nest-prereqs li { margin-bottom: 0.4rem; }
+.nest-prereqs a { color: var(--accent); }
+.nest-device-list { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.nest-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.nest-device:last-child { border-bottom: none; }
+.nest-device-name { font-weight: 600; font-size: 0.92rem; }
+.nest-device-meta { color: var(--text-muted); font-size: 0.8rem; }

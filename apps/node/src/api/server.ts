@@ -12,16 +12,44 @@ import type { IdentityStore } from "../config/identity.js";
 import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
+import type { NestBridge } from "../nest/sdm.js";
 
-const AddCameraBody = z.object({
-  name: z.string().min(1).max(80),
-  rtspUrl: z.string().url(),
-  rtspSubUrl: z.string().url().optional(),
-  make: z.string().max(80).optional(),
-  model: z.string().max(80).optional(),
-});
+const AddCameraBody = z
+  .object({
+    name: z.string().min(1).max(80),
+    source: z.enum(["rtsp", "nest"]).default("rtsp"),
+    rtspUrl: z.string().url().optional(),
+    rtspSubUrl: z.string().url().optional(),
+    nestDeviceId: z.string().min(1).optional(),
+    make: z.string().max(80).optional(),
+    model: z.string().max(80).optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.source === "rtsp" && body.rtspUrl === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rtspUrl"],
+        message: "rtspUrl is required for RTSP cameras",
+      });
+    }
+    if (body.source === "nest" && body.nestDeviceId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nestDeviceId"],
+        message: "nestDeviceId is required for Nest cameras",
+      });
+    }
+  });
 
 const ToggleBackupBody = z.object({ enabled: z.boolean() });
+
+const NestCredentialsBody = z.object({
+  projectId: z.string().min(1).max(200),
+  clientId: z.string().min(1).max(200),
+  clientSecret: z.string().min(1).max(200),
+});
+
+const NestCodeBody = z.object({ codeOrUrl: z.string().min(1).max(4000) });
 
 export interface ApiDeps {
   store: ConfigStore;
@@ -31,6 +59,7 @@ export interface ApiDeps {
   link: CloudLink;
   db: NodeDb;
   gdrive: GdriveBackup;
+  nest: NestBridge;
   version: string;
   log: Logger;
 }
@@ -92,7 +121,21 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "invalid body" });
     }
-    const camera = await deps.cameras.addCamera(parsed.data);
+    const input = { ...parsed.data };
+    if (input.source === "nest") {
+      const duplicate = deps.cameras
+        .list()
+        .some((c) => c.nest?.deviceId === input.nestDeviceId);
+      if (duplicate) {
+        return reply.code(409).send({ error: "that Nest device is already added as a camera" });
+      }
+      // Capabilities from SDM traits when cheaply available (cached list);
+      // ffprobe is skipped — the stream only exists once go2rtc pulls it.
+      const capabilities = await deps.nest.deviceCapabilities(input.nestDeviceId as string);
+      const camera = await deps.cameras.addCamera({ ...input, capabilities });
+      return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams()));
+    }
+    const camera = await deps.cameras.addCamera(input);
     return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams()));
   });
 
@@ -152,6 +195,79 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       backup: { ...backup, gdrive: { ...backup.gdrive, enabled: parsed.data.enabled } },
     });
     return deps.gdrive.getStatus();
+  });
+
+  /* ---------- Nest camera bridge (Google SDM) ---------- */
+
+  /**
+   * Bridge status: notConfigured {missing} (SDM project/OAuth client not yet
+   * entered) | disconnected | connected {projectId, devices?} | error {message}.
+   */
+  app.get("/api/nest", async () => deps.nest.getStatus());
+
+  /** Persist the user's Device Access project id + OAuth web client. */
+  app.post("/api/nest/credentials", async (req, reply) => {
+    const parsed = NestCredentialsBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "expected { projectId, clientId, clientSecret } (all non-empty)" });
+    }
+    deps.store.update({ nest: { ...deps.store.get().nest, ...parsed.data } });
+    return deps.nest.getStatus();
+  });
+
+  /** Consent URL for the manual paste-back OAuth flow. */
+  app.get("/api/nest/auth-url", async (_req, reply) => {
+    try {
+      return { url: deps.nest.buildAuthUrl() };
+    } catch (err) {
+      return reply
+        .code(409)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /** Exchange the pasted code (or full google.com URL) for tokens. */
+  app.post("/api/nest/code", async (req, reply) => {
+    const parsed = NestCodeBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "expected { codeOrUrl: string }" });
+    }
+    try {
+      await deps.nest.exchangeCode(parsed.data.codeOrUrl);
+    } catch (err) {
+      return reply
+        .code(400)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+    return deps.nest.getStatus();
+  });
+
+  /** Live devices.list (cached 60s; ?refresh=1 forces). */
+  app.get<{ Querystring: { refresh?: string } }>("/api/nest/devices", async (req, reply) => {
+    const status = deps.nest.getStatus();
+    if (status.status !== "connected") {
+      return reply.code(409).send({ error: `nest is ${status.status}` });
+    }
+    try {
+      const result = await deps.nest.listDevices(req.query.refresh === "1");
+      const addedDeviceIds = deps.cameras
+        .list()
+        .map((c) => c.nest?.deviceId)
+        .filter((id): id is string => id !== undefined);
+      return { ...result, addedDeviceIds };
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /** Revoke the Google grant and delete the local token file. */
+  app.post("/api/nest/disconnect", async () => {
+    await deps.nest.disconnect();
+    return deps.nest.getStatus();
   });
 
   /**

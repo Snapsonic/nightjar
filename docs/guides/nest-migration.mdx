@@ -7,10 +7,10 @@ icon: "arrow-right-arrow-left"
 
 People leave Nest Aware for two reasons: the subscription price keeps climbing, and every minute of footage lives in Google's cloud. Nightjar flips both — recording stays on your disk, detection runs on your hardware, and the optional cloud plan costs about half as much.
 
-This guide is honest about the tradeoffs. What you keep: 24/7 recording, smart alerts (person, vehicle, animal, package), remote live view, and event history. What you lose: the Nest app, Google Home integration, and — this is the big one — your existing Nest cameras, at least for now.
+This guide is honest about the tradeoffs. What you keep: 24/7 recording, smart alerts (person, vehicle, animal, package), remote live view, and event history. What you lose: the Nest app and Google Home integration. Your existing Nest cameras can now come along via an experimental bridge — with caveats — or be replaced with RTSP hardware, which remains the robust path.
 
 <Warning>
-**Nest cameras do not expose RTSP.** They cannot connect to Nightjar (or any third-party NVR) directly today. A bridge using Google's Smart Device Management (SDM) API is on the roadmap — follow [issue #7](https://github.com/Snapsonic/nightjar/issues/7) — but it is **not built yet**. The practical migration path is to run both systems side by side and swap camera hardware.
+**Nest cameras do not expose RTSP**, so they cannot connect to Nightjar directly. An **experimental bridge** using Google's Smart Device Management (SDM) API is now available: the node hands your Nest stream to go2rtc's native `nest:` source, and the camera then records and detects like any other. Setup requires your own Google Cloud project and a one-time $5 Device Access registration — see [Adding cameras → Nest cameras](/guides/cameras#nest-cameras-experimental-sdm-bridge). Know the limits: it needs 2021-or-newer cams (or older ones with SDM RTSP), battery cameras cannot stream continuously, and video still transits Google's servers. For anything you want rock-solid, the hardware swap below is still the recommended migration.
 </Warning>
 
 ## The plan
@@ -42,7 +42,7 @@ This guide is honest about the tradeoffs. What you keep: 24/7 recording, smart a
     Once your subscription ends, your Nest video history is gone. Export it first via [Google Takeout](https://takeout.google.com) (select the Nest product). You can also download individual clips from the Google Home app. Do this **before** canceling — history is deleted per Google's retention policy after the subscription lapses.
   </Step>
   <Step title="Cancel Nest Aware">
-    Cancel in your Google account subscriptions. The cameras themselves keep offering live view in Google Home without a subscription, so you can keep a couple around as spares, sell them, or wait for the SDM bridge.
+    Cancel in your Google account subscriptions. The cameras themselves keep offering live view in Google Home without a subscription, so you can keep a couple around as spares, sell them, or connect them to Nightjar through the experimental SDM bridge.
   </Step>
 </Steps>
 
@@ -82,7 +82,7 @@ Hardware prices are approximate street prices, not quotes. The point of the math
     They live in Google's cloud and are deleted after your Nest Aware retention window — and your access ends when the subscription does. Export what you want to keep via Google Takeout before canceling. Nightjar cannot import Nest history; the export is for your own archive.
   </Accordion>
   <Accordion title="Will the Nest bridge support my camera model?">
-    Unknown until it is built. The planned bridge uses Google's Smart Device Management API, which covers most modern Nest cameras that work in the Google Home app, and requires a one-time $5 registration fee with Google for Device Access. Scope and per-model support will be worked out in the open — follow [issue #7](https://github.com/Snapsonic/nightjar/issues/7).
+    The experimental bridge uses Google's Smart Device Management API, which covers most modern Nest cameras that work in the Google Home app: 2021-and-newer models stream via WebRTC, and some older ones expose an RTSP live stream through SDM. Battery cameras that sleep cannot stream continuously, so they are a poor fit for 24/7 recording. It requires a one-time $5 Device Access registration with Google. Setup and per-model notes: [Adding cameras → Nest cameras](/guides/cameras#nest-cameras-experimental-sdm-bridge); rough edges are tracked in [issue #7](https://github.com/Snapsonic/nightjar/issues/7).
   </Accordion>
   <Accordion title="Do I lose remote access by leaving Nest?">
     No. Remote live view is free on every Nightjar plan, including Free, with zero port forwarding. See [Remote access](/guides/remote-access).

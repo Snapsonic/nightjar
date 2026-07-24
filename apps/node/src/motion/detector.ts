@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { CameraConfig } from "@nightjar/shared";
+import { captureSubUrl } from "../cameras/streams.js";
 import { Emitter } from "../emitter.js";
 import type { ConfigStore } from "../config/store.js";
 import type { Logger } from "../log.js";
@@ -93,7 +94,7 @@ export class MotionDetector {
       const camera = wanted.get(cameraId);
       if (!camera) {
         this.stop(cameraId);
-      } else if (streamUrl(camera) !== streamUrl(cam.camera)) {
+      } else if (this.streamUrl(camera) !== this.streamUrl(cam.camera)) {
         this.log.info(`camera ${cameraId} URL changed — restarting motion decoder`);
         this.stop(cameraId);
         this.start(camera);
@@ -164,7 +165,7 @@ export class MotionDetector {
       "-nostdin",
       "-loglevel", "error",
       "-rtsp_transport", "tcp",
-      "-i", streamUrl(cam.camera),
+      "-i", this.streamUrl(cam.camera),
       "-vf", `fps=${FPS},scale=${FRAME_WIDTH}:${FRAME_HEIGHT},format=gray`,
       "-f", "rawvideo",
       "-",
@@ -279,6 +280,11 @@ export class MotionDetector {
     }
   }
 
+  /** Substream when configured, else the main stream (go2rtc restream for nest). */
+  private streamUrl(camera: CameraConfig): string {
+    return captureSubUrl(this.store.get(), camera);
+  }
+
   private checkQuiet(cam: CameraMotion): void {
     if (cam.active && Date.now() - cam.lastMotionMs >= QUIET_MS) this.endMotion(cam);
   }
@@ -289,9 +295,4 @@ export class MotionDetector {
     cam.consecutive = 0;
     this.emitter.emit({ type: "end", cameraId: cam.camera.id, atMs: Date.now() });
   }
-}
-
-/** Substream when configured, else the main stream. */
-function streamUrl(camera: CameraConfig): string {
-  return camera.rtspSubUrl ?? camera.rtspUrl;
 }

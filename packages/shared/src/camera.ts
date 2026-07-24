@@ -10,25 +10,65 @@ export const CameraCapabilities = z.object({
 });
 export type CameraCapabilities = z.infer<typeof CameraCapabilities>;
 
-export const CameraConfig = z.object({
+/** Nest (Google Smart Device Management) camera binding. The device id is an
+ *  opaque SDM identifier — not a credential (useless without the node's own
+ *  OAuth grant), so it may appear in the CameraPublic projection. */
+export const NestCameraSource = z.object({
+  deviceId: z.string().min(1),
+});
+export type NestCameraSource = z.infer<typeof NestCameraSource>;
+
+/**
+ * Base object schema (no cross-field rules) so projections like CameraPublic
+ * can still use .omit(); CameraConfig below adds the source/url invariants.
+ */
+const CameraConfigBase = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(80),
   make: z.string().max(80).optional(),
   model: z.string().max(80).optional(),
-  /** Main (high-res) RTSP URL. May contain credentials — never leaves the node. */
-  rtspUrl: z.string().url(),
+  /** Where the video comes from: a plain RTSP camera (default) or a Nest
+   *  camera bridged through go2rtc's native `nest:` source. */
+  source: z.enum(["rtsp", "nest"]).default("rtsp"),
+  /** Main (high-res) RTSP URL. May contain credentials — never leaves the
+   *  node. Required when source is "rtsp"; absent for "nest". */
+  rtspUrl: z.string().url().optional(),
   /** Optional low-res substream used for motion detection and remote live view. */
   rtspSubUrl: z.string().url().optional(),
+  /** Required when source is "nest". */
+  nest: NestCameraSource.optional(),
   enabled: z.boolean().default(true),
   record: z.boolean().default(true),
   detect: z.boolean().default(true),
   capabilities: CameraCapabilities.default({}),
 });
+
+export const CameraConfig = CameraConfigBase.superRefine((camera, ctx) => {
+  if (camera.source === "rtsp" && camera.rtspUrl === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rtspUrl"],
+      message: 'rtspUrl is required when source is "rtsp"',
+    });
+  }
+  if (camera.source === "nest" && camera.nest === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["nest"],
+      message: 'nest.deviceId is required when source is "nest"',
+    });
+  }
+});
 export type CameraConfig = z.infer<typeof CameraConfig>;
 
 /** Cloud-safe projection of a camera — everything except stream URLs/credentials. */
-export const CameraPublic = CameraConfig.omit({ rtspUrl: true, rtspSubUrl: true });
+export const CameraPublic = CameraConfigBase.omit({ rtspUrl: true, rtspSubUrl: true });
 export type CameraPublic = z.infer<typeof CameraPublic>;
 
 export const go2rtcStreamName = (cameraId: string, sub = false) =>
   `cam_${cameraId}${sub ? "_sub" : ""}`;
+
+/** go2rtc's RTSP restream module — enabled by default on this port. Nest
+ *  cameras have no direct RTSP URL, so the recorder/motion detector pull
+ *  them back out of go2rtc here. */
+export const GO2RTC_RTSP_PORT = 8554;

@@ -475,6 +475,400 @@ async function refreshBackup() {
   if (!backupBusy) renderBackup(backup);
 }
 
+/* ---------------- Nest cameras (SDM bridge) ---------------- */
+
+/** True while a nest action is in flight or the connect flow is showing —
+ *  keeps the poller from rebuilding the card mid-interaction. */
+let nestBusy = false;
+let nestFlowActive = false;
+/** Devices response cache so re-renders between polls stay stable. */
+let nestDevicesResult = null;
+
+function nestHint(text) {
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent = text;
+  return p;
+}
+
+function nestLink(href, label) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noreferrer";
+  a.textContent = label || href.replace(/^https?:\/\//, "");
+  return a;
+}
+
+async function nestFetchJson(url, body) {
+  const res = await fetch(url, {
+    method: body === undefined ? "GET" : "POST",
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((payload && payload.error) || `HTTP ${res.status}`);
+  return payload;
+}
+
+/** The compact checklist of Google-side prerequisites, with links. */
+function nestPrereqList() {
+  const ol = document.createElement("ol");
+  ol.className = "nest-prereqs";
+  const items = [
+    [
+      "In the ",
+      nestLink("https://console.cloud.google.com/", "Google Cloud Console"),
+      ", create a project, enable the Smart Device Management API, and publish an External OAuth consent screen.",
+    ],
+    [
+      "Create an OAuth client of type “Web application” with ",
+      (() => { const s = document.createElement("strong"); s.textContent = "https://www.google.com"; return s; })(),
+      " as an authorized redirect URI.",
+    ],
+    [
+      "Register for Device Access at ",
+      nestLink("https://console.nest.google.com/device-access", "console.nest.google.com/device-access"),
+      " ($5 one-time), create a Device Access project with that OAuth client ID, and copy its project ID.",
+    ],
+  ];
+  for (const parts of items) {
+    const li = document.createElement("li");
+    li.append(...parts);
+    ol.append(li);
+  }
+  return ol;
+}
+
+function nestCaveats() {
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent =
+    "Experimental. Works with 2021-and-newer Nest cams (WebRTC) and some older models via RTSP; " +
+    "battery cameras that sleep will not stream continuously. Video still transits Google's " +
+    "servers, and Google charges a one-time $5 Device Access fee.";
+  return p;
+}
+
+function renderNestCredentialsForm(card, isEdit) {
+  const form = document.createElement("form");
+  form.autocomplete = "off";
+  const fields = [
+    ["projectId", "Device Access project ID", "e.g. 32c4c2bc-fe0d-461b-b51c-…"],
+    ["clientId", "OAuth client ID", "…apps.googleusercontent.com"],
+    ["clientSecret", "OAuth client secret", "GOCSPX-…"],
+  ];
+  for (const [name, label, placeholder] of fields) {
+    const wrap = document.createElement("label");
+    wrap.append(label);
+    const input = document.createElement("input");
+    input.name = name;
+    input.type = name === "clientSecret" ? "password" : "text";
+    input.required = true;
+    input.placeholder = placeholder;
+    wrap.append(input);
+    form.append(wrap);
+  }
+  const row = document.createElement("div");
+  row.className = "form-row";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save credentials";
+  const error = document.createElement("span");
+  error.className = "error";
+  row.append(save, error);
+  form.append(row);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    save.disabled = true;
+    nestBusy = true;
+    const data = new FormData(form);
+    try {
+      const status = await nestFetchJson("/api/nest/credentials", {
+        projectId: String(data.get("projectId") || "").trim(),
+        clientId: String(data.get("clientId") || "").trim(),
+        clientSecret: String(data.get("clientSecret") || "").trim(),
+      });
+      nestFlowActive = false;
+      renderNest(status);
+    } catch (err) {
+      error.textContent = err instanceof Error ? err.message : String(err);
+      save.disabled = false;
+    } finally {
+      nestBusy = false;
+    }
+  });
+  if (isEdit) {
+    card.append(nestHint("Enter new SDM credentials (replaces the saved ones):"));
+  } else {
+    card.append(
+      nestHint(
+        "Bring your Nest cameras into Nightjar via Google's Smart Device Management API. " +
+          "One-time Google-side setup first:",
+      ),
+      nestPrereqList(),
+    );
+  }
+  card.append(form, nestCaveats());
+}
+
+function renderNestConnectFlow(card, authUrl) {
+  card.append(nestHint("1. Open the Google consent page and sign in with the account that owns your Nest cameras:"));
+  const linkRow = document.createElement("p");
+  linkRow.className = "hint";
+  linkRow.append(nestLink(authUrl, "Open Google sign-in"));
+  card.append(linkRow);
+  card.append(
+    nestHint(
+      "2. After approving, you land on google.com — the address bar holds ?code=… . " +
+        "Copy the FULL URL from the address bar and paste it here:",
+    ),
+  );
+  const form = document.createElement("form");
+  form.autocomplete = "off";
+  const label = document.createElement("label");
+  label.append("Pasted URL (or just the code)");
+  const input = document.createElement("input");
+  input.name = "codeOrUrl";
+  input.type = "text";
+  input.required = true;
+  input.placeholder = "https://www.google.com/?code=4/0A…";
+  label.append(input);
+  const row = document.createElement("div");
+  row.className = "form-row";
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.textContent = "Finish connection";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "danger";
+  cancel.textContent = "Cancel";
+  const error = document.createElement("span");
+  error.className = "error";
+  row.append(submit, cancel, error);
+  form.append(label, row);
+  cancel.addEventListener("click", () => {
+    nestFlowActive = false;
+    refreshNest();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    submit.disabled = true;
+    nestBusy = true;
+    try {
+      const status = await nestFetchJson("/api/nest/code", {
+        codeOrUrl: String(new FormData(form).get("codeOrUrl") || "").trim(),
+      });
+      nestFlowActive = false;
+      renderNest(status);
+    } catch (err) {
+      error.textContent = err instanceof Error ? err.message : String(err);
+      submit.disabled = false;
+    } finally {
+      nestBusy = false;
+    }
+  });
+  card.append(form);
+}
+
+function renderNestDevices(card, result) {
+  if (result.needsPartnerLink) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.append(
+      "Google returned no devices. You still need to link your Nest devices to your Device " +
+        "Access project in the Partner Connections Manager: ",
+      nestLink(result.partnerConnectionsUrl),
+      " — tick your cameras, finish the flow, then refresh here.",
+    );
+    card.append(p);
+    return;
+  }
+  const added = new Set(result.addedDeviceIds || []);
+  const list = document.createElement("ul");
+  list.className = "nest-device-list";
+  for (const device of result.devices) {
+    const item = document.createElement("li");
+    item.className = "nest-device";
+    const info = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "nest-device-name";
+    name.textContent = device.name + (device.room && device.room !== device.name ? ` — ${device.room}` : "");
+    const meta = document.createElement("div");
+    meta.className = "nest-device-meta";
+    meta.textContent = [
+      device.type ? device.type.replace(/^sdm\.devices\.types\./, "").toLowerCase() : null,
+      device.protocols.length ? device.protocols.join("/") : null,
+      device.maxVideoResolution ? `${device.maxVideoResolution.width}×${device.maxVideoResolution.height}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    info.append(name, meta);
+    const button = document.createElement("button");
+    button.type = "button";
+    if (added.has(device.deviceId)) {
+      button.textContent = "Added";
+      button.disabled = true;
+    } else {
+      button.textContent = "Add as camera";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        nestBusy = true;
+        try {
+          await nestFetchJson("/api/cameras", {
+            name: device.name,
+            source: "nest",
+            nestDeviceId: device.deviceId,
+            make: "Google Nest",
+          });
+        } catch (err) {
+          console.warn("add nest camera failed:", err);
+          button.disabled = false;
+        } finally {
+          nestBusy = false;
+        }
+        refresh();
+        refreshNest();
+      });
+    }
+    item.append(info, button);
+    list.append(item);
+  }
+  card.append(list);
+}
+
+function renderNest(status, devicesResult) {
+  const card = el("nestCard");
+  card.textContent = "";
+
+  if (status.status === "notConfigured") {
+    renderNestCredentialsForm(card, false);
+    return;
+  }
+
+  if (status.status === "disconnected" || status.status === "error") {
+    if (status.status === "error") {
+      const err = document.createElement("p");
+      err.className = "error";
+      err.textContent = `Nest: ${status.message || "unknown error"}`;
+      card.append(err);
+    }
+    card.append(
+      nestHint(
+        "Credentials saved. Connect the Google account that owns your Nest cameras to list " +
+          "and add them.",
+      ),
+    );
+    const row = document.createElement("div");
+    row.className = "form-row";
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.textContent = "Connect Google account";
+    connect.addEventListener("click", async () => {
+      connect.disabled = true;
+      nestBusy = true;
+      try {
+        const { url } = await nestFetchJson("/api/nest/auth-url");
+        nestFlowActive = true;
+        card.textContent = "";
+        renderNestConnectFlow(card, url);
+      } catch (err) {
+        console.warn("nest auth-url failed:", err);
+        connect.disabled = false;
+      } finally {
+        nestBusy = false;
+      }
+    });
+    const editCreds = document.createElement("button");
+    editCreds.type = "button";
+    editCreds.className = "danger";
+    editCreds.textContent = "Edit credentials";
+    editCreds.addEventListener("click", () => {
+      nestFlowActive = true;
+      card.textContent = "";
+      renderNestCredentialsForm(card, true);
+    });
+    row.append(connect, editCreds);
+    card.append(row, nestCaveats());
+    return;
+  }
+
+  if (status.status === "connected") {
+    const head = document.createElement("p");
+    head.className = "hint";
+    head.append("Connected to Device Access project ");
+    const strong = document.createElement("strong");
+    strong.textContent = status.projectId;
+    head.append(strong, ".");
+    card.append(head);
+    if (devicesResult) {
+      renderNestDevices(card, devicesResult);
+    } else {
+      card.append(nestHint("Loading devices…"));
+    }
+    const row = document.createElement("div");
+    row.className = "form-row";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.textContent = "Refresh devices";
+    refreshBtn.addEventListener("click", async () => {
+      refreshBtn.disabled = true;
+      nestBusy = true;
+      try {
+        nestDevicesResult = await nestFetchJson("/api/nest/devices?refresh=1");
+      } catch (err) {
+        console.warn("nest devices refresh failed:", err);
+      } finally {
+        nestBusy = false;
+      }
+      refreshNest();
+    });
+    const disconnect = document.createElement("button");
+    disconnect.type = "button";
+    disconnect.className = "danger";
+    disconnect.textContent = "Disconnect";
+    disconnect.addEventListener("click", async () => {
+      if (!confirm("Disconnect the Nest bridge? Nest cameras will stop streaming until reconnected.")) return;
+      disconnect.disabled = true;
+      nestBusy = true;
+      try {
+        const next = await nestFetchJson("/api/nest/disconnect");
+        nestDevicesResult = null;
+        renderNest(next);
+      } catch (err) {
+        console.warn("nest disconnect failed:", err);
+        disconnect.disabled = false;
+      } finally {
+        nestBusy = false;
+      }
+    });
+    row.append(refreshBtn, disconnect);
+    card.append(row, nestCaveats());
+  }
+}
+
+async function refreshNest() {
+  if (nestBusy || nestFlowActive) return;
+  let status;
+  try {
+    const res = await fetch("/api/nest");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    status = await res.json();
+  } catch {
+    return; // keep the previous card on transient errors
+  }
+  if (status.status === "connected") {
+    try {
+      nestDevicesResult = await fetch("/api/nest/devices").then((r) => (r.ok ? r.json() : null));
+    } catch {
+      // keep whatever we had
+    }
+  }
+  if (!nestBusy && !nestFlowActive) renderNest(status, nestDevicesResult);
+}
+
 /* ---------------- status polling ---------------- */
 
 async function refresh() {
@@ -493,6 +887,7 @@ async function refresh() {
   renderCameras(status);
   refreshEvents(status);
   refreshBackup();
+  refreshNest();
 }
 
 /* ---------------- add-camera form ---------------- */
