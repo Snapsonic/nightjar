@@ -134,7 +134,14 @@ export class Go2rtcSupervisor {
       if (!camera.enabled) continue;
       const main = this.renderSource(camera);
       if (main === null) continue;
-      const sub = camera.source === "rtsp" ? (camera.rtspSubUrl ?? main) : main;
+      // Nest cameras must NOT open a second SDM session for the sub stream —
+      // Google rate-limits stream generation (429s with 5 cams x 2 streams).
+      // The sub consumes go2rtc's own restream of main: one Google session
+      // per camera, shared by recording, motion, and remote view.
+      const sub =
+        camera.source === "rtsp"
+          ? (camera.rtspSubUrl ?? main)
+          : `rtsp://127.0.0.1:${GO2RTC_RTSP_PORT}/${go2rtcStreamName(camera.id)}`;
       // Skip the opus transcode only when the camera is known to have no
       // audio (hasAudio === false); unknown (older configs) gets it too —
       // a stream without audio degrades to an inactive audio m-line.

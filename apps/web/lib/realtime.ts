@@ -66,6 +66,19 @@ interface Pending {
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * One NodeChannel per node, shared across components: supabase-js returns the
+ * SAME underlying realtime channel for a duplicate topic, and subscribing an
+ * already-joined channel never fires its status callback — so a second
+ * independent NodeChannel on one page would hang forever. connect() refcounts;
+ * close() only tears down when the last user releases it.
+ */
+interface SharedEntry {
+  promise: Promise<NodeChannel>;
+  refs: number;
+}
+const sharedChannels = new Map<string, SharedEntry>();
+
 export class NodeChannel {
   private readonly pending = new Map<string, Pending>();
   private closed = false;
@@ -80,12 +93,27 @@ export class NodeChannel {
    * channels), subscribes to `node:{nodeId}` and resolves once joined.
    */
   static async connect(supabase: BrowserClient, nodeId: string): Promise<NodeChannel> {
+    const existing = sharedChannels.get(nodeId);
+    if (existing) {
+      existing.refs += 1;
+      return existing.promise;
+    }
+    const entry: SharedEntry = { refs: 1, promise: NodeChannel.open(supabase, nodeId) };
+    sharedChannels.set(nodeId, entry);
+    try {
+      return await entry.promise;
+    } catch (err) {
+      sharedChannels.delete(nodeId);
+      throw err;
+    }
+  }
+
+  private static async open(supabase: BrowserClient, nodeId: string): Promise<NodeChannel> {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
     if (!token) throw new NodeChannelError("You are signed out.", "channel");
 
-    // Private channels require an authorized realtime connection.
-    await supabase.realtime.setAuth(token);
+    // Private channels require an authorized realtime connection.    await supabase.realtime.setAuth(token);
 
     const channel = supabase.channel(nodeTopic(nodeId), {
       config: { private: true, broadcast: { self: false, ack: false } },
@@ -292,8 +320,16 @@ export class NodeChannel {
   }
 
   /** Unsubscribes and rejects any in-flight requests. Safe to call twice. */
+  /** Releases this user's reference; the underlying channel is only torn down
+   *  when the last component on the page lets go. */
   close(): void {
     if (this.closed) return;
+    const entry = sharedChannels.get(this.nodeId);
+    if (entry) {
+      entry.refs -= 1;
+      if (entry.refs > 0) return;
+      sharedChannels.delete(this.nodeId);
+    }
     this.closed = true;
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
