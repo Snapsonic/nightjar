@@ -520,6 +520,9 @@ export class NestBridge {
         hasSubstream: false,
         videoCodec: device.videoCodecs[0]?.toLowerCase(),
         audioCodec: device.audioCodecs[0]?.toLowerCase(),
+        hasAudio: device.audioCodecs.length > 0,
+        // talkback stays "none": SDM offers no way to send audio to
+        // RTSP-generation Nest cameras.
         width: device.maxVideoResolution?.width,
         height: device.maxVideoResolution?.height,
       });

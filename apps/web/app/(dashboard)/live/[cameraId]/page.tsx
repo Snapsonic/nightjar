@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { CameraCapabilities } from "@nightjar/shared";
 import { LivePlayer } from "@/components/live-player";
 import { NodeStatusBadge } from "@/components/status-badge";
 import { TimelineHistory } from "@/components/timeline-history";
@@ -24,7 +25,7 @@ export default async function LivePage({
   const supabase = await createClient();
   const { data: camera, error } = await supabase
     .from("cameras")
-    .select("id, node_id, name, enabled")
+    .select("id, node_id, name, enabled, capabilities")
     .eq("id", cameraId)
     .maybeSingle();
 
@@ -53,6 +54,13 @@ export default async function LivePage({
 
   const online = node ? isNodeOnline(toNodeStatus(node.status), node.last_seen_at) : false;
 
+  // The node syncs CameraPublic.capabilities into the jsonb column; tolerate
+  // rows written by older node builds (fields are additive with defaults).
+  const parsedCapabilities = CameraCapabilities.safeParse(camera.capabilities ?? {});
+  const capabilities = parsedCapabilities.success
+    ? parsedCapabilities.data
+    : CameraCapabilities.parse({});
+
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -74,7 +82,12 @@ export default async function LivePage({
             This camera is disabled on its node.
           </div>
         ) : (
-          <LivePlayer cameraId={camera.id} nodeId={camera.node_id} nodeOnline={online} />
+          <LivePlayer
+            cameraId={camera.id}
+            nodeId={camera.node_id}
+            nodeOnline={online}
+            capabilities={capabilities}
+          />
         )}
       </div>
 

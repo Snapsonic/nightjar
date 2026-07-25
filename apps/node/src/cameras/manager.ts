@@ -46,6 +46,10 @@ export async function probe(rtspUrl: string): Promise<CameraCapabilities> {
     hasSubstream: false, // set by the caller based on rtspSubUrl
     videoCodec: video.codec_name,
     audioCodec: audio?.codec_name,
+    hasAudio: audio !== undefined,
+    // talkback stays at its default ("none") — the user may flip it to
+    // "backchannel" for cameras with an RTSP/ONVIF audio backchannel;
+    // probeCamera preserves that choice across re-probes.
     width: video.width,
     height: video.height,
     fps: parseFps(video.avg_frame_rate, video.r_frame_rate),
@@ -153,6 +157,8 @@ export class CameraManager {
     }
     const capabilities = await probe(camera.rtspUrl);
     capabilities.hasSubstream = camera.rtspSubUrl !== undefined;
+    // talkback is user-configured (no ONVIF auto-detection yet) — keep it.
+    capabilities.talkback = camera.capabilities.talkback;
     this.updateCamera(id, { capabilities });
     return capabilities;
   }

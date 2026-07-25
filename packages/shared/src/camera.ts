@@ -4,6 +4,18 @@ export const CameraCapabilities = z.object({
   hasSubstream: z.boolean().default(false),
   videoCodec: z.string().optional(),
   audioCodec: z.string().optional(),
+  /** True when the source publishes an audio track (ffprobe for RTSP cameras,
+   *  SDM audio traits for Nest). Absent on configs saved by older builds. */
+  hasAudio: z.boolean().optional(),
+  /** Two-way audio: "backchannel" means the camera can receive audio sent
+   *  back through its stream (RTSP/ONVIF Profile T backchannel — go2rtc
+   *  forwards browser mic audio automatically). Nest cameras bridged over
+   *  legacy RTSP can never receive audio (SDM has no talkback there), so
+   *  they stay "none". For plain RTSP cameras this is a config field the
+   *  user can flip to "backchannel"; it survives re-probes.
+   *  TODO: auto-detect ONVIF backchannel support instead of relying on the
+   *  user-set flag. */
+  talkback: z.enum(["none", "backchannel"]).default("none"),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   fps: z.number().positive().optional(),

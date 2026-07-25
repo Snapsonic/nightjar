@@ -111,13 +111,36 @@ export class Go2rtcSupervisor {
       lines.push(`        - ${JSON.stringify(server)}`);
     }
     const streams: string[] = [];
+    /**
+     * Emit one stream. With `withOpus`, a secondary `ffmpeg:{name}#audio=opus`
+     * source is added: WebRTC cannot carry the cameras' AAC audio, so go2rtc
+     * lazily spawns ffmpeg (loopback via its own RTSP restream of this same
+     * stream) to transcode audio to Opus for WebRTC viewers. Plain RTSP
+     * consumers (recorder / motion detection) are unaffected — go2rtc serves
+     * them the first matching codecs, i.e. the primary source's original
+     * H264+AAC, so recordings keep AAC (verified against go2rtc 1.9.x: the
+     * restream ffprobes as aac while the WebRTC answer offers opus).
+     */
+    const pushStream = (name: string, source: string, withOpus: boolean): void => {
+      if (!withOpus) {
+        streams.push(`  ${JSON.stringify(name)}: ${JSON.stringify(source)}`);
+        return;
+      }
+      streams.push(`  ${JSON.stringify(name)}:`);
+      streams.push(`    - ${JSON.stringify(source)}`);
+      streams.push(`    - ${JSON.stringify(`ffmpeg:${name}#audio=opus`)}`);
+    };
     for (const camera of config.cameras) {
       if (!camera.enabled) continue;
       const main = this.renderSource(camera);
       if (main === null) continue;
       const sub = camera.source === "rtsp" ? (camera.rtspSubUrl ?? main) : main;
-      streams.push(`  ${JSON.stringify(go2rtcStreamName(camera.id))}: ${JSON.stringify(main)}`);
-      streams.push(`  ${JSON.stringify(go2rtcStreamName(camera.id, true))}: ${JSON.stringify(sub)}`);
+      // Skip the opus transcode only when the camera is known to have no
+      // audio (hasAudio === false); unknown (older configs) gets it too —
+      // a stream without audio degrades to an inactive audio m-line.
+      const withOpus = camera.capabilities.hasAudio !== false;
+      pushStream(go2rtcStreamName(camera.id), main, withOpus);
+      pushStream(go2rtcStreamName(camera.id, true), sub, withOpus);
     }
     if (streams.length === 0) {
       lines.push("streams: {}");

@@ -25,18 +25,52 @@ function waitForIceGathering(pc) {
   });
 }
 
-async function startPlayer(cameraId, video) {
+/** True when getUserMedia exists — requires a secure context (HTTPS or
+ *  localhost). Over plain http://LAN-IP it is undefined and talkback
+ *  degrades to listen-only with a hint. */
+function micSupported() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+async function startPlayer(camera, video) {
+  const cameraId = camera.id;
   const existing = players.get(cameraId);
   if (existing && (existing.starting || existing.pc.connectionState === "connected")) return;
   stopPlayer(cameraId);
 
   const pc = new RTCPeerConnection();
   const stream = new MediaStream();
-  const entry = { pc, video, starting: true };
+  const entry = { pc, video, starting: true, micStream: null, micTrack: null };
   players.set(cameraId, entry);
 
+  // Talkback (push-to-talk): the mic track must be part of the offer —
+  // go2rtc's SDP exchange is one-shot, there is no renegotiation later.
+  const caps = camera.capabilities || {};
+  if (caps.talkback === "backchannel" && micSupported()) {
+    try {
+      const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const track = mic.getAudioTracks()[0] || null;
+      if (track) {
+        track.enabled = false; // hold-to-talk enables it
+        entry.micStream = mic;
+        entry.micTrack = track;
+      }
+    } catch (err) {
+      console.warn(`microphone unavailable for ${cameraId}:`, err);
+    }
+    if (players.get(cameraId) !== entry) {
+      // stopped while the mic permission prompt was open
+      if (entry.micStream) for (const t of entry.micStream.getTracks()) t.stop();
+      return;
+    }
+  }
+
   pc.addTransceiver("video", { direction: "recvonly" });
-  pc.addTransceiver("audio", { direction: "recvonly" });
+  if (entry.micTrack) {
+    pc.addTransceiver(entry.micTrack, { direction: "sendrecv" });
+  } else {
+    pc.addTransceiver("audio", { direction: "recvonly" });
+  }
   pc.ontrack = (event) => {
     stream.addTrack(event.track);
     if (video.srcObject !== stream) video.srcObject = stream;
@@ -74,6 +108,7 @@ function stopPlayer(cameraId) {
   try {
     entry.pc.close();
   } catch {}
+  if (entry.micStream) for (const t of entry.micStream.getTracks()) t.stop();
   if (entry.video) entry.video.srcObject = null;
 }
 
@@ -378,6 +413,39 @@ function buildCameraCard(camera) {
   caps.className = "camera-caps";
   nameWrap.append(dot, name, caps);
 
+  const muteBtn = document.createElement("button");
+  muteBtn.type = "button";
+  muteBtn.className = "audio-toggle";
+  muteBtn.textContent = "Unmute";
+  muteBtn.addEventListener("click", () => {
+    video.muted = !video.muted;
+    muteBtn.textContent = video.muted ? "Unmute" : "Mute";
+  });
+
+  const talkBtn = document.createElement("button");
+  talkBtn.type = "button";
+  talkBtn.className = "talk-button hidden";
+  talkBtn.textContent = "Hold to talk";
+  const setTalking = (on) => {
+    const player = players.get(camera.id);
+    const track = player && player.micTrack;
+    if (!track) return;
+    track.enabled = on;
+    talkBtn.textContent = on ? "Talking…" : "Hold to talk";
+    talkBtn.classList.toggle("talking", on);
+  };
+  talkBtn.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    setTalking(true);
+  });
+  for (const evName of ["pointerup", "pointerleave", "pointercancel"]) {
+    talkBtn.addEventListener(evName, () => setTalking(false));
+  }
+  talkBtn.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+  const talkHint = document.createElement("span");
+  talkHint.className = "talk-hint muted hidden";
+
   const historyBtn = document.createElement("button");
   historyBtn.type = "button";
   historyBtn.className = "history-toggle";
@@ -403,7 +471,7 @@ function buildCameraCard(camera) {
 
   const actions = document.createElement("div");
   actions.className = "camera-actions";
-  actions.append(historyBtn, del);
+  actions.append(talkHint, muteBtn, talkBtn, historyBtn, del);
   meta.append(nameWrap, actions);
 
   const timeline = document.createElement("div");
@@ -418,6 +486,9 @@ function buildCameraCard(camera) {
     name,
     caps,
     timeline,
+    muteBtn,
+    talkBtn,
+    talkHint,
     historyBtn,
     historyOpen: false,
     historyPlaying: false,
@@ -450,20 +521,38 @@ function renderCameras(status) {
     entry.name.textContent = camera.name;
     entry.dot.className = `dot ${camera.online ? "dot-ok" : "dot-bad"}`;
     const c = camera.capabilities || {};
+    // Older configs lack hasAudio — fall back to audioCodec presence.
+    const hasAudio = c.hasAudio !== undefined ? c.hasAudio : !!c.audioCodec;
     entry.caps.textContent = [
       c.width && c.height ? `${c.width}×${c.height}` : null,
       c.videoCodec || null,
+      hasAudio ? "audio" : null,
       camera.hasSubstream ? "sub" : null,
     ]
       .filter(Boolean)
       .join(" · ");
+
+    // Talkback controls: hold-to-talk when the camera has a backchannel and
+    // the page can use the mic; hints otherwise. getUserMedia needs a secure
+    // context — http://LAN-IP has no navigator.mediaDevices.
+    const talkback = c.talkback === "backchannel";
+    entry.talkBtn.classList.toggle("hidden", !(talkback && micSupported()));
+    if (talkback && !micSupported()) {
+      entry.talkHint.textContent = "talkback needs https or localhost";
+      entry.talkHint.classList.remove("hidden");
+    } else if (!talkback && hasAudio) {
+      entry.talkHint.textContent = "camera can't receive audio";
+      entry.talkHint.classList.remove("hidden");
+    } else {
+      entry.talkHint.classList.add("hidden");
+    }
 
     if (entry.historyPlaying) {
       // Viewing recorded history — leave the <video> alone until "Back to live".
       entry.overlay.classList.add("hidden");
     } else if (camera.online && camera.enabled) {
       entry.overlay.classList.add("hidden");
-      startPlayer(camera.id, entry.video);
+      startPlayer(camera, entry.video);
     } else {
       entry.overlay.classList.remove("hidden");
       entry.overlay.textContent = camera.enabled ? "offline" : "disabled";
