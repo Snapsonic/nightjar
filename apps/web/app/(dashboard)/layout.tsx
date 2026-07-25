@@ -14,7 +14,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   return (
     <div className="min-h-dvh">
       <Sidebar />
-      <main className="min-h-dvh px-4 pt-6 pb-24 sm:px-6 md:pt-8 md:pb-10 md:pl-[17rem] lg:px-10">
+      <main className="min-h-dvh px-4 pt-6 pb-24 sm:px-6 md:pt-8 md:pb-10 md:pl-[17rem] lg:pr-10 lg:pl-[17.5rem]">
         <div className="mx-auto w-full max-w-6xl">{children}</div>
       </main>
     </div>

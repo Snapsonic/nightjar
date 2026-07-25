@@ -61,6 +61,8 @@ export interface AddCameraInput {
   rtspSubUrl?: string;
   /** Required when source is "nest". */
   nestDeviceId?: string;
+  /** SDM live-stream protocols for nest cameras (["RTSP"] or ["WEB_RTC"]). */
+  nestProtocols?: string[];
   make?: string;
   model?: string;
   /** Pre-computed capabilities (e.g. from SDM traits for nest cameras). */
@@ -115,7 +117,10 @@ export class CameraManager {
       source,
       rtspUrl: source === "rtsp" ? input.rtspUrl : undefined,
       rtspSubUrl: source === "rtsp" ? input.rtspSubUrl : undefined,
-      nest: source === "nest" ? { deviceId: input.nestDeviceId as string } : undefined,
+      nest:
+        source === "nest"
+          ? { deviceId: input.nestDeviceId as string, protocols: input.nestProtocols ?? [] }
+          : undefined,
       capabilities,
     });
     this.store.update({ cameras: [...this.list(), camera] });

@@ -30,10 +30,13 @@ export interface NestEndpoints {
   revoke: string;
   /** SDM REST base, e.g. https://smartdevicemanagement.googleapis.com/v1 */
   api: string;
+  /** Partner Connections base — consent pages live at {base}/{projectId}/auth. */
+  partnerAuthBase: string;
 }
 
 export const NEST_GOOGLE_ENDPOINTS: NestEndpoints = {
   auth: "https://accounts.google.com/o/oauth2/v2/auth",
+  partnerAuthBase: "https://nestservices.google.com/partnerconnections",
   token: "https://oauth2.googleapis.com/token",
   revoke: "https://oauth2.googleapis.com/revoke",
   api: "https://smartdevicemanagement.googleapis.com/v1",
@@ -265,7 +268,10 @@ export class NestBridge {
       access_type: "offline",
       prompt: "consent",
     });
-    return `${this.endpoints.auth}?${params.toString()}`;
+    // Device Access grants must go through the Partner Connections page for
+    // this project — a plain accounts.google.com consent is rejected with
+    // access_denied because the grant isn't bound to the SDM project.
+    return `${this.endpoints.partnerAuthBase}/${encodeURIComponent(creds.projectId)}/auth?${params.toString()}`;
   }
 
   /**
@@ -494,6 +500,17 @@ export class NestBridge {
    * live list when connected). ffprobe cannot probe a nest camera at add time
    * — the stream only exists once go2rtc pulls it.
    */
+  /** SDM live-stream protocols for a device (["RTSP"] or ["WEB_RTC"]) —
+   *  required by the go2rtc source line; empty when unknown. */
+  async deviceProtocols(deviceId: string): Promise<string[]> {
+    try {
+      const { devices } = await this.listDevices();
+      return devices.find((d) => d.deviceId === deviceId)?.protocols ?? [];
+    } catch {
+      return [];
+    }
+  }
+
   async deviceCapabilities(deviceId: string): Promise<CameraCapabilities | undefined> {
     try {
       const { devices } = await this.listDevices();

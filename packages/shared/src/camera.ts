@@ -15,6 +15,10 @@ export type CameraCapabilities = z.infer<typeof CameraCapabilities>;
  *  OAuth grant), so it may appear in the CameraPublic projection. */
 export const NestCameraSource = z.object({
   deviceId: z.string().min(1),
+  /** SDM live-stream protocols (e.g. ["RTSP"] or ["WEB_RTC"]). go2rtc's nest
+   *  source defaults to WebRTC, so RTSP-generation cameras MUST carry this —
+   *  omitting it makes go2rtc call GenerateWebRtcStream and Google 400s. */
+  protocols: z.array(z.string()).default([]),
 });
 export type NestCameraSource = z.infer<typeof NestCameraSource>;
 

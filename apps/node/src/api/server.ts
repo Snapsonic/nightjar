@@ -132,7 +132,8 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       // Capabilities from SDM traits when cheaply available (cached list);
       // ffprobe is skipped — the stream only exists once go2rtc pulls it.
       const capabilities = await deps.nest.deviceCapabilities(input.nestDeviceId as string);
-      const camera = await deps.cameras.addCamera({ ...input, capabilities });
+      const nestProtocols = await deps.nest.deviceProtocols(input.nestDeviceId as string);
+      const camera = await deps.cameras.addCamera({ ...input, capabilities, nestProtocols });
       return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams()));
     }
     const camera = await deps.cameras.addCamera(input);

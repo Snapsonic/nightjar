@@ -85,6 +85,10 @@ export class Go2rtcSupervisor {
         project_id: params.projectId,
         device_id: camera.nest.deviceId,
       });
+      // go2rtc defaults to WEB_RTC; RTSP-generation cameras must say so.
+      if (camera.nest.protocols.length > 0) {
+        query.set("protocols", camera.nest.protocols.join(","));
+      }
       return `nest:?${query.toString()}`;
     }
     return camera.rtspUrl ?? null;
