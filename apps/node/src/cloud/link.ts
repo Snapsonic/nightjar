@@ -461,7 +461,9 @@ export class CloudLink {
     const storagePath = `${nodeId}/snap-${message.cameraId}-${Date.now()}.jpg`;
     const { error: uploadError } = await client.storage
       .from("snapshots")
-      .upload(storagePath, bytes, { contentType: "image/jpeg", upsert: true });
+      // No upsert: the path is timestamped-unique, and storage's upsert path
+      // requires an UPDATE policy evaluation that plain inserts don't need.
+      .upload(storagePath, bytes, { contentType: "image/jpeg" });
     if (uploadError) throw new LinkError("internal", `snapshot upload: ${uploadError.message}`);
 
     const { data, error: signError } = await client.storage
