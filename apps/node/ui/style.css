@@ -187,6 +187,7 @@ button.talk-button.talking { filter: brightness(1.25); }
 }
 .timeline-status { font-size: 0.8rem; }
 button.timeline-back { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+.timeline-bar-wrap { position: relative; }
 .timeline-bar {
   position: relative;
   height: 26px;
@@ -195,6 +196,7 @@ button.timeline-back { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
   background: var(--bg-inset);
   overflow: hidden;
   cursor: crosshair;
+  touch-action: none; /* touch-drag scrubs the preview instead of scrolling */
 }
 .timeline-span {
   position: absolute;
@@ -212,6 +214,84 @@ button.timeline-back { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
   pointer-events: none;
   z-index: 2;
 }
+/* now-playing indicator: clip range + playhead */
+.timeline-active {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgb(56 189 248 / 0.4);
+  border-left: 1px solid rgb(125 211 252 / 0.9);
+  border-right: 1px solid rgb(125 211 252 / 0.9);
+  pointer-events: none;
+  z-index: 1;
+}
+.timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--text);
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* floating hover preview */
+.timeline-preview {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: 176px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.45);
+}
+.timeline-preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #000;
+}
+.timeline-preview-msg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.timeline-preview-spin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+}
+.timeline-preview-spin::after {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: timeline-preview-spin 0.8s linear infinite;
+}
+@keyframes timeline-preview-spin {
+  to { transform: rotate(360deg); }
+}
+.timeline-preview-time {
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--text);
+  padding: 2px 4px;
+  border-top: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
 .timeline-hours {
   display: flex;
   justify-content: space-between;

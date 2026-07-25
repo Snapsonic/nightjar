@@ -1,4 +1,4 @@
-import { statfsSync } from "node:fs";
+import { readFileSync, statfsSync } from "node:fs";
 import { z } from "zod";
 import { createNightjarClient, type Json, type NightjarClient } from "@nightjar/db";
 import {
@@ -17,6 +17,7 @@ import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
 import type { Recorder } from "../recorder/recorder.js";
 import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
+import { getPreviewFrame, previewBucketMs } from "../recorder/preview.js";
 import {
   TIMELINE_BUCKET,
   cleanupTimelineExports,
@@ -30,6 +31,7 @@ type SnapshotRequestMessage = Extract<RealtimeMessage, { type: "snapshot_request
 type TimelineDaysMessage = Extract<RealtimeMessage, { type: "timeline_days_request" }>;
 type TimelineCoverageMessage = Extract<RealtimeMessage, { type: "timeline_coverage_request" }>;
 type TimelineExportMessage = Extract<RealtimeMessage, { type: "timeline_export_request" }>;
+type TimelinePreviewMessage = Extract<RealtimeMessage, { type: "timeline_preview_request" }>;
 type DiskInfo = Extract<RealtimeMessage, { type: "status_reply" }>["disk"];
 
 const TokenResponse = z.object({
@@ -74,6 +76,8 @@ export interface CloudLinkDeps {
 }
 
 const TOKEN_POLL_MS = 30_000;
+/** Signed-URL TTL for timeline hover previews. */
+const PREVIEW_SIGNED_URL_TTL_S = 600;
 const HEARTBEAT_MS = 60_000;
 const TIMELINE_CLEANUP_MS = 6 * 3_600_000;
 const BACKOFF_START_MS = 1_000;
@@ -432,6 +436,9 @@ export class CloudLink {
       case "timeline_export_request":
         await this.replyOrError(message.requestId, () => this.onTimelineExport(message));
         break;
+      case "timeline_preview_request":
+        await this.replyOrError(message.requestId, () => this.onTimelinePreview(message));
+        break;
       default:
         // Replies (possibly our own echoes) — nothing to do.
         break;
@@ -596,6 +603,63 @@ export class CloudLink {
       },
     });
     await this.send({ type: "timeline_export_reply", requestId: message.requestId, url });
+  }
+
+  /**
+   * Hover preview: extract (or reuse) the minute-bucketed frame from the local
+   * preview cache, upload it once to the "snapshots" bucket at
+   * {nodeId}/previews/{cameraId}-{bucketMs}.jpg (skipped when the object
+   * already exists — signed directly), reply with a 600s signed URL.
+   */
+  private async onTimelinePreview(message: TimelinePreviewMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    const client = this.client;
+    const nodeId = this.getNodeId();
+    if (!client || !nodeId) throw new LinkError("internal", "cloud session not ready");
+
+    const bucketMs = previewBucketMs(message.atMs);
+    const objectPath = `${nodeId}/previews/${message.cameraId}-${bucketMs}.jpg`;
+    const bucket = client.storage.from("snapshots");
+    const sign = async (): Promise<string | null> => {
+      const { data, error } = await bucket.createSignedUrl(objectPath, PREVIEW_SIGNED_URL_TTL_S);
+      if (error || !data) return null;
+      return data.signedUrl;
+    };
+
+    // Minute-bucketed frames are immutable — an existing object is reusable.
+    const existing = await sign();
+    if (existing) {
+      await this.send({ type: "timeline_preview_reply", requestId: message.requestId, url: existing });
+      return;
+    }
+
+    const jpgPath = await getPreviewFrame(
+      {
+        recordingsDir: this.deps.store.get().paths.recordings,
+        segmentsBetween: (cameraId, t0Ms, t1Ms) => this.deps.db.segmentsBetween(cameraId, t0Ms, t1Ms),
+        log: this.log,
+      },
+      message.cameraId,
+      message.atMs,
+    );
+    if (!jpgPath) throw new LinkError("internal", "no recording at that time");
+
+    const bytes = readFileSync(jpgPath);
+    const { error: uploadError } = await bucket.upload(objectPath, bytes, {
+      contentType: "image/jpeg",
+    });
+    if (uploadError) {
+      // Duplicate-upload race — if the object is signable now, someone else won.
+      const raced = await sign();
+      if (raced) {
+        await this.send({ type: "timeline_preview_reply", requestId: message.requestId, url: raced });
+        return;
+      }
+      throw new LinkError("internal", `preview upload: ${uploadError.message}`);
+    }
+    const url = await sign();
+    if (!url) throw new LinkError("internal", "uploaded preview could not be signed");
+    await this.send({ type: "timeline_preview_reply", requestId: message.requestId, url });
   }
 
   private async onStatusRequest(requestId: string): Promise<void> {

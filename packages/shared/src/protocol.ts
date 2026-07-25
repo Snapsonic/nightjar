@@ -96,6 +96,21 @@ export const TimelineCoverageReply = z.object({
   spans: z.array(z.object({ startMs: z.number(), endMs: z.number() })),
 });
 
+export const TimelinePreviewRequest = z.object({
+  type: z.literal("timeline_preview_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+  /** Instant to preview (unix ms). The node buckets it to the minute. */
+  atMs: z.number().int().nonnegative(),
+});
+
+export const TimelinePreviewReply = z.object({
+  type: z.literal("timeline_preview_reply"),
+  ...base,
+  /** Signed Supabase Storage URL for the preview JPEG (10 min TTL). */
+  url: z.string().url(),
+});
+
 export const TimelineExportRequest = z.object({
   type: z.literal("timeline_export_request"),
   ...base,
@@ -129,6 +144,8 @@ export const RealtimeMessage = z.discriminatedUnion("type", [
   TimelineDaysReply,
   TimelineCoverageRequest,
   TimelineCoverageReply,
+  TimelinePreviewRequest,
+  TimelinePreviewReply,
   TimelineExportRequest,
   TimelineExportReply,
   ErrorReply,

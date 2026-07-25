@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { CameraIcon, LiveIcon } from "@/components/icons";
+import { CameraIcon, HistoryIcon, LiveIcon } from "@/components/icons";
 import { NodeChannel, NodeChannelError } from "@/lib/realtime";
 import { getBrowserClient } from "@/lib/supabase/client";
 
@@ -182,18 +182,32 @@ export function NodeCameras({
                 <p className="truncate text-sm font-medium text-fog-100">{camera.name}</p>
                 {camera.capLabel && <p className="text-[11px] text-fog-500">{camera.capLabel}</p>}
               </div>
-              <Link
-                href={`/live/${camera.id}`}
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
-                  online && camera.enabled
-                    ? "border-ember-500/40 text-ember-300 hover:bg-ember-500/10"
-                    : "pointer-events-none border-night-600 text-fog-500"
-                }`}
-                aria-disabled={!online || !camera.enabled}
-              >
-                <LiveIcon className="h-3.5 w-3.5" />
-                Live
-              </Link>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Link
+                  href={`/live/${camera.id}?tab=history`}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                    online
+                      ? "border-night-500 text-fog-300 hover:border-fog-500 hover:text-fog-100"
+                      : "pointer-events-none border-night-600 text-fog-500"
+                  }`}
+                  aria-disabled={!online}
+                >
+                  <HistoryIcon className="h-3.5 w-3.5" />
+                  History
+                </Link>
+                <Link
+                  href={`/live/${camera.id}`}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                    online && camera.enabled
+                      ? "border-ember-500/40 text-ember-300 hover:bg-ember-500/10"
+                      : "pointer-events-none border-night-600 text-fog-500"
+                  }`}
+                  aria-disabled={!online || !camera.enabled}
+                >
+                  <LiveIcon className="h-3.5 w-3.5" />
+                  Live
+                </Link>
+              </div>
             </div>
           </div>
         );

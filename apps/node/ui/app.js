@@ -116,6 +116,11 @@ function stopPlayer(cameraId) {
 
 const HISTORY_PRE_MS = 30_000;
 const HISTORY_POST_MS = 90_000;
+/** Hover preview: wait this long before asking the node for a frame. */
+const PREVIEW_DEBOUNCE_MS = 250;
+const PREVIEW_BUCKET_MS = 60_000;
+/** Revoke + drop cached preview object URLs beyond this many buckets. */
+const PREVIEW_CACHE_MAX = 200;
 
 function historyDayStartMs(day) {
   const [y, m, d] = day.split("-").map(Number);
@@ -146,6 +151,54 @@ function renderHistorySpans(entry) {
     div.style.width = `${Math.max(0.15, Math.min(100 - left, width))}%`;
     bar.append(div);
   }
+  positionHistoryIndicator(entry);
+}
+
+/* ----- now-playing indicator (range highlight + moving playhead) ----- */
+
+function positionHistoryIndicator(entry) {
+  const active = entry.historyActive;
+  const playhead = entry.historyPlayhead;
+  if (!active || !playhead) return;
+  const range = entry.historyRange;
+  if (!range || range.day !== entry.historyDay) {
+    active.classList.add("hidden");
+    playhead.classList.add("hidden");
+    return;
+  }
+  const dayStart = historyDayStartMs(range.day);
+  const dayLen = historyDayEndMs(range.day) - dayStart;
+  const left = Math.max(0, ((range.fromMs - dayStart) / dayLen) * 100);
+  const right = Math.min(100, ((range.toMs - dayStart) / dayLen) * 100);
+  if (right <= left) {
+    active.classList.add("hidden");
+    playhead.classList.add("hidden");
+    return;
+  }
+  active.style.left = `${left}%`;
+  active.style.width = `${Math.max(right - left, 0.25)}%`;
+  active.classList.remove("hidden");
+  updateHistoryPlayhead(entry);
+}
+
+/** Sync the playhead line to the clip video: clipStartMs + currentTime. */
+function updateHistoryPlayhead(entry) {
+  const playhead = entry.historyPlayhead;
+  const range = entry.historyRange;
+  if (!playhead) return;
+  if (!range || range.day !== entry.historyDay) {
+    playhead.classList.add("hidden");
+    return;
+  }
+  const ms = range.fromMs + (entry.video.currentTime || 0) * 1000;
+  const dayStart = historyDayStartMs(range.day);
+  const pct = ((ms - dayStart) / (historyDayEndMs(range.day) - dayStart)) * 100;
+  if (pct < 0 || pct > 100) {
+    playhead.classList.add("hidden");
+    return;
+  }
+  playhead.style.left = `${pct}%`;
+  playhead.classList.remove("hidden");
 }
 
 async function loadHistoryCoverage(cameraId, entry) {
@@ -171,19 +224,23 @@ async function loadHistoryCoverage(cameraId, entry) {
 function playHistoryClip(cameraId, entry, fromMs, toMs) {
   stopPlayer(cameraId);
   entry.historyPlaying = true;
+  entry.historyRange = { fromMs, toMs, day: entry.historyDay };
   entry.video.srcObject = null;
   entry.video.controls = true;
   entry.video.src = `/api/recordings/${encodeURIComponent(cameraId)}/export?fromMs=${fromMs}&toMs=${toMs}`;
   entry.video.play().catch(() => {});
   entry.overlay.classList.add("hidden");
   entry.historyBack.classList.remove("hidden");
-  const fmt = (ms) => new Date(ms).toLocaleTimeString();
-  setHistoryStatus(entry, `Playing ${fmt(fromMs)} – ${fmt(toMs)}`);
+  positionHistoryIndicator(entry);
+  const fmt = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  setHistoryStatus(entry, `Viewing ${fmt(fromMs)} – ${fmt(toMs)}`);
 }
 
 function backToLive(cameraId, entry) {
   if (!entry.historyPlaying) return;
   entry.historyPlaying = false;
+  entry.historyRange = null;
+  positionHistoryIndicator(entry);
   entry.video.controls = false;
   entry.video.removeAttribute("src");
   entry.video.load();
@@ -234,6 +291,9 @@ function buildHistoryUi(cameraId, entry) {
 
   row.append(select, back, status);
 
+  const barWrap = document.createElement("div");
+  barWrap.className = "timeline-bar-wrap";
+
   const bar = document.createElement("div");
   bar.className = "timeline-bar";
   entry.historyBar = bar;
@@ -242,19 +302,119 @@ function buildHistoryUi(cameraId, entry) {
   cursor.className = "timeline-cursor hidden";
   bar.append(cursor);
 
+  // Now-playing indicator: highlighted clip range + moving playhead.
+  const active = document.createElement("div");
+  active.className = "timeline-active hidden";
+  const playhead = document.createElement("div");
+  playhead.className = "timeline-playhead hidden";
+  bar.append(active, playhead);
+  entry.historyActive = active;
+  entry.historyPlayhead = playhead;
+
+  // Floating hover preview (thumbnail + timestamp) above the bar.
+  const preview = document.createElement("div");
+  preview.className = "timeline-preview hidden";
+  const previewImg = document.createElement("img");
+  previewImg.alt = "";
+  const previewMsg = document.createElement("div");
+  previewMsg.className = "timeline-preview-msg hidden";
+  const previewSpin = document.createElement("div");
+  previewSpin.className = "timeline-preview-spin hidden";
+  const previewTime = document.createElement("div");
+  previewTime.className = "timeline-preview-time";
+  preview.append(previewImg, previewMsg, previewSpin, previewTime);
+  barWrap.append(bar, preview);
+
+  const setPreviewContent = (url, msg) => {
+    previewImg.classList.toggle("hidden", !url);
+    previewMsg.classList.toggle("hidden", !!url || msg === null);
+    previewSpin.classList.toggle("hidden", !!url || msg !== null);
+    if (url) previewImg.src = url;
+    else if (msg !== null) previewMsg.textContent = msg;
+  };
+
+  const applyCachedPreview = (bucket) => {
+    const url = entry.previewCache.get(bucket);
+    setPreviewContent(url, url === null ? "no preview" : null);
+  };
+
+  const fetchPreview = async (bucket) => {
+    const seq = ++entry.previewSeq;
+    try {
+      const res = await fetch(
+        `/api/recordings/${encodeURIComponent(cameraId)}/preview?atMs=${bucket}`,
+      );
+      if (res.status === 404) {
+        entry.previewCache.set(bucket, null);
+      } else if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      } else {
+        if (entry.previewCache.size >= PREVIEW_CACHE_MAX) {
+          for (const url of entry.previewCache.values()) {
+            if (url) URL.revokeObjectURL(url);
+          }
+          entry.previewCache.clear();
+        }
+        entry.previewCache.set(bucket, URL.createObjectURL(await res.blob()));
+      }
+    } catch (err) {
+      console.warn("preview failed:", err);
+      entry.previewCache.set(bucket, null);
+    }
+    // Only the latest request may update the tooltip (stale ones just cache).
+    if (entry.previewSeq === seq && !preview.classList.contains("hidden")) {
+      applyCachedPreview(bucket);
+    }
+  };
+
   const timeAtEvent = (ev) => {
     const rect = bar.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
     const dayStart = historyDayStartMs(entry.historyDay);
     return dayStart + frac * (historyDayEndMs(entry.historyDay) - dayStart);
   };
-  bar.addEventListener("pointermove", (ev) => {
+  const hidePreview = () => {
+    entry.previewSeq++; // orphan any in-flight request
+    if (entry.previewTimer) clearTimeout(entry.previewTimer);
+    entry.previewTimer = null;
+    preview.classList.add("hidden");
+    cursor.classList.add("hidden");
+  };
+  const moveHandler = (ev) => {
     const rect = bar.getBoundingClientRect();
+    if (!rect.width) return;
+    const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
     cursor.classList.remove("hidden");
-    cursor.style.left = `${Math.min(100, Math.max(0, ((ev.clientX - rect.left) / rect.width) * 100))}%`;
-    bar.title = new Date(timeAtEvent(ev)).toLocaleTimeString();
-  });
-  bar.addEventListener("pointerleave", () => cursor.classList.add("hidden"));
+    cursor.style.left = `${frac * 100}%`;
+    const ms = timeAtEvent(ev);
+    bar.title = "";
+    preview.classList.remove("hidden");
+    preview.style.left = `${Math.min(92, Math.max(8, frac * 100))}%`;
+    previewTime.textContent = new Date(ms).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    entry.previewSeq++; // whatever was in flight no longer wins
+    if (entry.previewTimer) clearTimeout(entry.previewTimer);
+    entry.previewTimer = null;
+    const covered = entry.historySpans.some((s) => ms >= s.startMs && ms <= s.endMs);
+    if (!covered) {
+      setPreviewContent(null, "no recording");
+      return;
+    }
+    const bucket = Math.floor(ms / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
+    if (entry.previewCache.has(bucket)) {
+      applyCachedPreview(bucket); // warm — show instantly, no debounce
+      return;
+    }
+    setPreviewContent(null, null); // spinner while debouncing/fetching
+    entry.previewTimer = setTimeout(() => fetchPreview(bucket), PREVIEW_DEBOUNCE_MS);
+  };
+  bar.addEventListener("pointermove", moveHandler);
+  bar.addEventListener("pointerdown", moveHandler); // touch-drag scrubbing
+  bar.addEventListener("pointerleave", hidePreview);
+  bar.addEventListener("pointercancel", hidePreview);
   bar.addEventListener("click", (ev) => {
     const clicked = Math.round(timeAtEvent(ev));
     const span = entry.historySpans.find((s) => clicked >= s.startMs && clicked <= s.endMs);
@@ -273,7 +433,8 @@ function buildHistoryUi(cameraId, entry) {
     hours.append(label);
   }
 
-  t.append(row, bar, hours);
+  t.append(row, barWrap, hours);
+  positionHistoryIndicator(entry);
 }
 
 async function toggleHistory(cameraId, entry) {
@@ -498,10 +659,19 @@ function buildCameraCard(camera) {
     historyBar: null,
     historyStatus: null,
     historyBack: null,
+    historyRange: null,
+    historyActive: null,
+    historyPlayhead: null,
+    previewCache: new Map(),
+    previewTimer: null,
+    previewSeq: 0,
   };
   historyBtn.addEventListener("click", () => toggleHistory(camera.id, entry));
   video.addEventListener("error", () => {
     if (entry.historyPlaying) setHistoryStatus(entry, "Could not load that clip.", true);
+  });
+  video.addEventListener("timeupdate", () => {
+    if (entry.historyPlaying) updateHistoryPlayhead(entry);
   });
   return entry;
 }

@@ -53,14 +53,19 @@ export function LivePlayer({
   nodeId,
   nodeOnline,
   capabilities,
+  autoConnect = true,
 }: {
   cameraId: string;
   nodeId: string;
   nodeOnline: boolean;
   capabilities?: CameraCapabilities;
+  /** When false (?tab=history deep link), no WebRTC session is opened until
+   *  the user clicks "Start live" — saves a stream session on the camera. */
+  autoConnect?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
+  const [started, setStarted] = useState(autoConnect);
   const [state, setState] = useState<ConnState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -75,6 +80,7 @@ export function LivePlayer({
     : false;
 
   useEffect(() => {
+    if (!started) return;
     let cancelled = false;
     let pc: RTCPeerConnection | null = null;
     let channel: NodeChannel | null = null;
@@ -189,7 +195,7 @@ export function LivePlayer({
       const video = videoRef.current;
       if (video) video.srcObject = null;
     };
-  }, [cameraId, nodeId, attempt, wantsTalkback]);
+  }, [cameraId, nodeId, attempt, wantsTalkback, started]);
 
   const toggleMute = () => {
     const video = videoRef.current;
@@ -227,7 +233,23 @@ export function LivePlayer({
           className="absolute inset-0 h-full w-full bg-night-950 object-contain"
         />
 
-        {state !== "connected" && (
+        {!started && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-night-950/85 px-6 text-center">
+            <p className="text-sm text-fog-300">Live view is paused.</p>
+            <button
+              type="button"
+              onClick={() => setStarted(true)}
+              className="inline-flex items-center gap-2 rounded-lg bg-ember-500 px-4 py-2 text-sm font-semibold text-night-950 transition-colors hover:bg-ember-400"
+            >
+              Start live
+            </button>
+            <p className="max-w-sm text-xs text-fog-500">
+              Starting live opens a stream session on the camera.
+            </p>
+          </div>
+        )}
+
+        {started && state !== "connected" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-night-950/85 px-6 text-center">
             {state === "connecting" ? (
               <>
@@ -260,19 +282,23 @@ export function LivePlayer({
         <span className="flex items-center gap-2 text-xs text-fog-400">
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              state === "connected"
-                ? "bg-online"
-                : state === "connecting"
-                  ? "animate-pulse bg-ember-400"
-                  : "bg-danger"
+              !started
+                ? "bg-night-500"
+                : state === "connected"
+                  ? "bg-online"
+                  : state === "connecting"
+                    ? "animate-pulse bg-ember-400"
+                    : "bg-danger"
             }`}
             aria-hidden="true"
           />
-          {state === "connected"
-            ? "Live · substream"
-            : state === "connecting"
-              ? "Connecting…"
-              : "Disconnected"}
+          {!started
+            ? "Live paused"
+            : state === "connected"
+              ? "Live · substream"
+              : state === "connecting"
+                ? "Connecting…"
+                : "Disconnected"}
         </span>
 
         <div className="flex items-center gap-2">

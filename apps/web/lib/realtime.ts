@@ -7,6 +7,7 @@ import {
   type TimelineCoverageRequest,
   type TimelineDaysRequest,
   type TimelineExportRequest,
+  type TimelinePreviewRequest,
   type WhepOffer,
 } from "@nightjar/shared";
 import { REALTIME_SUBSCRIBE_STATES, type RealtimeChannel } from "@supabase/supabase-js";
@@ -44,6 +45,7 @@ type ReplyMessage = Extract<
       | "status_reply"
       | "timeline_days_reply"
       | "timeline_coverage_reply"
+      | "timeline_preview_reply"
       | "timeline_export_reply";
   }
 >;
@@ -55,6 +57,7 @@ type OutgoingRequest =
   | Omit<z.infer<typeof NodeStatusRequest>, "requestId">
   | Omit<z.infer<typeof TimelineDaysRequest>, "requestId">
   | Omit<z.infer<typeof TimelineCoverageRequest>, "requestId">
+  | Omit<z.infer<typeof TimelinePreviewRequest>, "requestId">
   | Omit<z.infer<typeof TimelineExportRequest>, "requestId">;
 
 interface Pending {
@@ -113,7 +116,8 @@ export class NodeChannel {
     const token = data.session?.access_token;
     if (!token) throw new NodeChannelError("You are signed out.", "channel");
 
-    // Private channels require an authorized realtime connection.    await supabase.realtime.setAuth(token);
+    // Private channels require an authorized realtime connection.
+    await supabase.realtime.setAuth(token);
 
     const channel = supabase.channel(nodeTopic(nodeId), {
       config: { private: true, broadcast: { self: false, ack: false } },
@@ -162,6 +166,7 @@ export class NodeChannel {
       message.type === "status_request" ||
       message.type === "timeline_days_request" ||
       message.type === "timeline_coverage_request" ||
+      message.type === "timeline_preview_request" ||
       message.type === "timeline_export_request"
     ) {
       return;
@@ -300,6 +305,21 @@ export class NodeChannel {
       timeoutMs,
     );
     return reply.spans;
+  }
+
+  /** Single preview frame near atMs (minute-bucketed on the node); resolves
+   *  to a short-TTL signed JPEG URL. Cold extractions run ffmpeg first. */
+  async requestTimelinePreview(
+    cameraId: string,
+    atMs: number,
+    timeoutMs: number = 15_000,
+  ): Promise<string> {
+    const reply = await this.request(
+      { type: "timeline_preview_request", cameraId, atMs },
+      ["timeline_preview_reply"],
+      timeoutMs,
+    );
+    return reply.url;
   }
 
   /** Exports [fromMs, toMs) on the node and resolves to a signed clip URL.

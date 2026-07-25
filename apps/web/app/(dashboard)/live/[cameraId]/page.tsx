@@ -16,11 +16,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export default async function LivePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ cameraId: string }>;
+  searchParams: Promise<{ tab?: string | string[] }>;
 }) {
   const { cameraId } = await params;
   if (!UUID_RE.test(cameraId)) notFound();
+
+  // ?tab=history (dashboard "History" action): focus the history section and
+  // do NOT auto-open the live WebRTC session — live is one click away.
+  const { tab } = await searchParams;
+  const historyTab = (Array.isArray(tab) ? tab[0] : tab) === "history";
 
   const supabase = await createClient();
   const { data: camera, error } = await supabase
@@ -76,7 +83,7 @@ export default async function LivePage({
         {node && <span className="text-xs text-fog-500">on {node.name}</span>}
       </div>
 
-      <div className="mt-5">
+      <div id="live" className="mt-5 scroll-mt-4">
         {!camera.enabled ? (
           <div className="flex aspect-video w-full items-center justify-center rounded-2xl border border-night-600 bg-night-850 text-sm text-fog-400">
             This camera is disabled on its node.
@@ -87,11 +94,12 @@ export default async function LivePage({
             nodeId={camera.node_id}
             nodeOnline={online}
             capabilities={capabilities}
+            autoConnect={!historyTab}
           />
         )}
       </div>
 
-      <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} />
+      <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} autoFocus={historyTab} />
     </>
   );
 }

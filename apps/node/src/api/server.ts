@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream, statSync, unlinkSync } from "node:fs";
+import { createReadStream, readFileSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -17,6 +17,7 @@ import type { Logger } from "../log.js";
 import type { NestBridge } from "../nest/sdm.js";
 import type { Recorder } from "../recorder/recorder.js";
 import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
+import { getPreviewFrame } from "../recorder/preview.js";
 
 const AddCameraBody = z
   .object({
@@ -295,6 +296,43 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       const bounds = dayBoundsMs(day);
       const rows = deps.db.segmentsBetween(req.params.cameraId, bounds.startMs, bounds.endMs);
       return clipSpans(mergeCoverage(rows, Date.now()), bounds.startMs, bounds.endMs);
+    },
+  );
+
+  /**
+   * Single JPEG preview frame at ?atMs= (bucketed to the minute, disk-cached
+   * under <recordings>/.previews). 404 when no recording covers that minute.
+   */
+  app.get<{ Params: { cameraId: string }; Querystring: { atMs?: string } }>(
+    "/api/recordings/:cameraId/preview",
+    async (req, reply) => {
+      const atMs = Number(req.query.atMs);
+      if (!Number.isFinite(atMs) || atMs < 0) {
+        return reply.code(400).send({ error: "expected numeric ?atMs=" });
+      }
+      const jpgPath = await getPreviewFrame(
+        {
+          recordingsDir: deps.store.get().paths.recordings,
+          segmentsBetween: (cameraId, t0Ms, t1Ms) => deps.db.segmentsBetween(cameraId, t0Ms, t1Ms),
+          log: deps.log,
+        },
+        req.params.cameraId,
+        atMs,
+      );
+      if (!jpgPath) {
+        return reply.code(404).send({ error: "no recording at that time" });
+      }
+      let bytes: Buffer;
+      try {
+        // Small (~320w q7) file; read whole so a pruned-midway file 404s cleanly.
+        bytes = readFileSync(jpgPath);
+      } catch {
+        return reply.code(404).send({ error: "no recording at that time" });
+      }
+      reply.header("content-type", "image/jpeg");
+      // Minute-bucketed frames are immutable once extracted.
+      reply.header("cache-control", "private, max-age=300");
+      return reply.send(bytes);
     },
   );
 

@@ -57,6 +57,16 @@ export function LiveIcon({ className }: IconProps) {
   );
 }
 
+export function HistoryIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...stroke}>
+      <path d="M4.5 5.5 v4 h4" />
+      <path d="M4.9 13.5 a8 8 0 1 0 1 -6.2 l-1.4 2.2" />
+      <path d="M12 8.5 V12.5 l2.8 1.8" />
+    </svg>
+  );
+}
+
 /* ---- event kind icons ---- */
 
 function MotionIcon({ className }: IconProps) {
