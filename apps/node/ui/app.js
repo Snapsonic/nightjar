@@ -77,6 +77,195 @@ function stopPlayer(cameraId) {
   if (entry.video) entry.video.srcObject = null;
 }
 
+/* ---------------- history timeline ---------------- */
+
+const HISTORY_PRE_MS = 30_000;
+const HISTORY_POST_MS = 90_000;
+
+function historyDayStartMs(day) {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+}
+
+function historyDayEndMs(day) {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(y, m - 1, d + 1).getTime();
+}
+
+function setHistoryStatus(entry, text, isError) {
+  entry.historyStatus.textContent = text;
+  entry.historyStatus.classList.toggle("error", !!isError);
+}
+
+function renderHistorySpans(entry) {
+  const bar = entry.historyBar;
+  for (const old of bar.querySelectorAll(".timeline-span")) old.remove();
+  const dayStart = historyDayStartMs(entry.historyDay);
+  const dayLen = historyDayEndMs(entry.historyDay) - dayStart;
+  for (const span of entry.historySpans) {
+    const div = document.createElement("div");
+    div.className = "timeline-span";
+    const left = ((span.startMs - dayStart) / dayLen) * 100;
+    const width = ((span.endMs - span.startMs) / dayLen) * 100;
+    div.style.left = `${Math.max(0, left)}%`;
+    div.style.width = `${Math.max(0.15, Math.min(100 - left, width))}%`;
+    bar.append(div);
+  }
+}
+
+async function loadHistoryCoverage(cameraId, entry) {
+  setHistoryStatus(entry, "Loading coverage…");
+  try {
+    const res = await fetch(
+      `/api/recordings/${encodeURIComponent(cameraId)}/coverage?day=${encodeURIComponent(entry.historyDay)}`,
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    entry.historySpans = await res.json();
+    setHistoryStatus(
+      entry,
+      entry.historySpans.length ? "Click a recorded stretch to play it." : "No recordings this day.",
+    );
+  } catch (err) {
+    console.warn("coverage load failed:", err);
+    entry.historySpans = [];
+    setHistoryStatus(entry, "Could not load coverage.", true);
+  }
+  renderHistorySpans(entry);
+}
+
+function playHistoryClip(cameraId, entry, fromMs, toMs) {
+  stopPlayer(cameraId);
+  entry.historyPlaying = true;
+  entry.video.srcObject = null;
+  entry.video.controls = true;
+  entry.video.src = `/api/recordings/${encodeURIComponent(cameraId)}/export?fromMs=${fromMs}&toMs=${toMs}`;
+  entry.video.play().catch(() => {});
+  entry.overlay.classList.add("hidden");
+  entry.historyBack.classList.remove("hidden");
+  const fmt = (ms) => new Date(ms).toLocaleTimeString();
+  setHistoryStatus(entry, `Playing ${fmt(fromMs)} – ${fmt(toMs)}`);
+}
+
+function backToLive(cameraId, entry) {
+  if (!entry.historyPlaying) return;
+  entry.historyPlaying = false;
+  entry.video.controls = false;
+  entry.video.removeAttribute("src");
+  entry.video.load();
+  entry.historyBack.classList.add("hidden");
+  setHistoryStatus(entry, entry.historySpans.length ? "Click a recorded stretch to play it." : "");
+  refresh(); // restarts the WHEP player on the next render
+}
+
+function buildHistoryUi(cameraId, entry) {
+  const t = entry.timeline;
+  t.textContent = "";
+
+  if (entry.historyDays.length === 0) {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = "No 24/7 recordings for this camera yet.";
+    t.append(p);
+    return;
+  }
+
+  const row = document.createElement("div");
+  row.className = "timeline-row";
+
+  const select = document.createElement("select");
+  select.className = "timeline-day";
+  for (const day of entry.historyDays) {
+    const option = document.createElement("option");
+    option.value = day;
+    option.textContent = day;
+    select.append(option);
+  }
+  select.value = entry.historyDay;
+  select.addEventListener("change", () => {
+    entry.historyDay = select.value;
+    loadHistoryCoverage(cameraId, entry);
+  });
+
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "timeline-back hidden";
+  back.textContent = "Back to live";
+  back.addEventListener("click", () => backToLive(cameraId, entry));
+  entry.historyBack = back;
+
+  const status = document.createElement("span");
+  status.className = "timeline-status muted";
+  entry.historyStatus = status;
+
+  row.append(select, back, status);
+
+  const bar = document.createElement("div");
+  bar.className = "timeline-bar";
+  entry.historyBar = bar;
+
+  const cursor = document.createElement("div");
+  cursor.className = "timeline-cursor hidden";
+  bar.append(cursor);
+
+  const timeAtEvent = (ev) => {
+    const rect = bar.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+    const dayStart = historyDayStartMs(entry.historyDay);
+    return dayStart + frac * (historyDayEndMs(entry.historyDay) - dayStart);
+  };
+  bar.addEventListener("pointermove", (ev) => {
+    const rect = bar.getBoundingClientRect();
+    cursor.classList.remove("hidden");
+    cursor.style.left = `${Math.min(100, Math.max(0, ((ev.clientX - rect.left) / rect.width) * 100))}%`;
+    bar.title = new Date(timeAtEvent(ev)).toLocaleTimeString();
+  });
+  bar.addEventListener("pointerleave", () => cursor.classList.add("hidden"));
+  bar.addEventListener("click", (ev) => {
+    const clicked = Math.round(timeAtEvent(ev));
+    const span = entry.historySpans.find((s) => clicked >= s.startMs && clicked <= s.endMs);
+    if (!span) {
+      setHistoryStatus(entry, "No recording at that time.");
+      return;
+    }
+    playHistoryClip(cameraId, entry, clicked - HISTORY_PRE_MS, clicked + HISTORY_POST_MS);
+  });
+
+  const hours = document.createElement("div");
+  hours.className = "timeline-hours";
+  for (const h of ["00:00", "06:00", "12:00", "18:00", "24:00"]) {
+    const label = document.createElement("span");
+    label.textContent = h;
+    hours.append(label);
+  }
+
+  t.append(row, bar, hours);
+}
+
+async function toggleHistory(cameraId, entry) {
+  if (entry.historyOpen) {
+    entry.historyOpen = false;
+    entry.historyBtn.textContent = "History";
+    entry.timeline.classList.add("hidden");
+    backToLive(cameraId, entry);
+    return;
+  }
+  entry.historyOpen = true;
+  entry.historyBtn.textContent = "Hide history";
+  entry.timeline.classList.remove("hidden");
+  entry.timeline.textContent = "Loading…";
+  try {
+    const res = await fetch(`/api/recordings/${encodeURIComponent(cameraId)}/days`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    entry.historyDays = await res.json();
+  } catch (err) {
+    console.warn("days load failed:", err);
+    entry.historyDays = [];
+  }
+  entry.historyDay = entry.historyDays[entry.historyDays.length - 1] || null;
+  buildHistoryUi(cameraId, entry);
+  if (entry.historyDay) await loadHistoryCoverage(cameraId, entry);
+}
+
 /* ---------------- rendering ---------------- */
 
 function renderHeader(status) {
@@ -189,6 +378,11 @@ function buildCameraCard(camera) {
   caps.className = "camera-caps";
   nameWrap.append(dot, name, caps);
 
+  const historyBtn = document.createElement("button");
+  historyBtn.type = "button";
+  historyBtn.className = "history-toggle";
+  historyBtn.textContent = "History";
+
   const del = document.createElement("button");
   del.type = "button";
   del.className = "danger";
@@ -207,9 +401,38 @@ function buildCameraCard(camera) {
     refresh();
   });
 
-  meta.append(nameWrap, del);
-  card.append(videoWrap, meta);
-  return { card, video, overlay, dot, name, caps };
+  const actions = document.createElement("div");
+  actions.className = "camera-actions";
+  actions.append(historyBtn, del);
+  meta.append(nameWrap, actions);
+
+  const timeline = document.createElement("div");
+  timeline.className = "timeline hidden";
+
+  card.append(videoWrap, meta, timeline);
+  const entry = {
+    card,
+    video,
+    overlay,
+    dot,
+    name,
+    caps,
+    timeline,
+    historyBtn,
+    historyOpen: false,
+    historyPlaying: false,
+    historyDay: null,
+    historyDays: [],
+    historySpans: [],
+    historyBar: null,
+    historyStatus: null,
+    historyBack: null,
+  };
+  historyBtn.addEventListener("click", () => toggleHistory(camera.id, entry));
+  video.addEventListener("error", () => {
+    if (entry.historyPlaying) setHistoryStatus(entry, "Could not load that clip.", true);
+  });
+  return entry;
 }
 
 function renderCameras(status) {
@@ -235,7 +458,10 @@ function renderCameras(status) {
       .filter(Boolean)
       .join(" · ");
 
-    if (camera.online && camera.enabled) {
+    if (entry.historyPlaying) {
+      // Viewing recorded history — leave the <video> alone until "Back to live".
+      entry.overlay.classList.add("hidden");
+    } else if (camera.online && camera.enabled) {
       entry.overlay.classList.add("hidden");
       startPlayer(camera.id, entry.video);
     } else {

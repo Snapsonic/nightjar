@@ -47,6 +47,8 @@ async function main(): Promise<void> {
     identity,
     cameras,
     go2rtc,
+    db,
+    recorder,
     version: VERSION,
     log: log.child("cloud"),
   });
@@ -74,6 +76,7 @@ async function main(): Promise<void> {
     go2rtc,
     link,
     db,
+    recorder,
     gdrive,
     nest,
     version: VERSION,

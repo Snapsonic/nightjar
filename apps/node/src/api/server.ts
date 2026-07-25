@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { createReadStream, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -13,6 +15,8 @@ import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
 import type { NestBridge } from "../nest/sdm.js";
+import type { Recorder } from "../recorder/recorder.js";
+import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
 
 const AddCameraBody = z
   .object({
@@ -58,6 +62,7 @@ export interface ApiDeps {
   go2rtc: Go2rtcSupervisor;
   link: CloudLink;
   db: NodeDb;
+  recorder: Recorder;
   gdrive: GdriveBackup;
   nest: NestBridge;
   version: string;
@@ -270,6 +275,109 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
     await deps.nest.disconnect();
     return deps.nest.getStatus();
   });
+
+  /* ---------- 24/7 recording timeline ---------- */
+
+  /** Days (node-local YYYY-MM-DD) that have any recorded segments. */
+  app.get<{ Params: { cameraId: string } }>(
+    "/api/recordings/:cameraId/days",
+    async (req) => deps.db.segmentDays(req.params.cameraId),
+  );
+
+  /** Merged coverage spans [{startMs,endMs}] for one local-time day. */
+  app.get<{ Params: { cameraId: string }; Querystring: { day?: string } }>(
+    "/api/recordings/:cameraId/coverage",
+    async (req, reply) => {
+      const day = req.query.day ?? "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        return reply.code(400).send({ error: "expected ?day=YYYY-MM-DD" });
+      }
+      const bounds = dayBoundsMs(day);
+      const rows = deps.db.segmentsBetween(req.params.cameraId, bounds.startMs, bounds.endMs);
+      return clipSpans(mergeCoverage(rows, Date.now()), bounds.startMs, bounds.endMs);
+    },
+  );
+
+  /**
+   * Export [fromMs, toMs) as a single mp4 and stream it (inline, with basic
+   * single-range support so <video> can seek). The range is clamped to 15
+   * minutes; the temp file is deleted once the response stream closes.
+   */
+  app.get<{ Params: { cameraId: string }; Querystring: { fromMs?: string; toMs?: string } }>(
+    "/api/recordings/:cameraId/export",
+    async (req, reply) => {
+      const range = clampExportRange(Number(req.query.fromMs), Number(req.query.toMs));
+      if (!range) {
+        return reply.code(400).send({ error: "expected numeric ?fromMs=&toMs= with fromMs < toMs" });
+      }
+      const cameraId = req.params.cameraId;
+      if (deps.recorder.segmentsBetween(cameraId, range.fromMs, range.toMs).length === 0) {
+        return reply.code(404).send({ error: "no recordings in that range" });
+      }
+      const outPath = path.join(
+        deps.store.get().paths.recordings,
+        ".exports",
+        `${cameraId}-${range.fromMs}-${range.toMs}-${randomUUID()}.mp4`,
+      );
+      try {
+        await deps.recorder.exportRange(cameraId, range.fromMs, range.toMs, outPath);
+      } catch (err) {
+        try {
+          unlinkSync(outPath);
+        } catch {
+          // never created
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes("no recorded segments")) {
+          return reply.code(404).send({ error: "no recordings in that range" });
+        }
+        deps.log.warn(`timeline export failed: ${message}`);
+        return reply.code(500).send({ error: "export failed" });
+      }
+
+      const size = statSync(outPath).size;
+      reply.header("content-type", "video/mp4");
+      reply.header("accept-ranges", "bytes");
+      reply.header(
+        "content-disposition",
+        `inline; filename="${cameraId}-${range.fromMs}.mp4"`,
+      );
+
+      // Single-range support (Safari requires 206 responses to play mp4).
+      let start = 0;
+      let end = size - 1;
+      const rangeHeader = req.headers.range;
+      const match = rangeHeader ? /^bytes=(\d*)-(\d*)$/.exec(rangeHeader) : null;
+      if (match && (match[1] !== "" || match[2] !== "")) {
+        if (match[1] === "") {
+          start = Math.max(0, size - Number(match[2]));
+        } else {
+          start = Number(match[1]);
+          if (match[2] !== "") end = Math.min(end, Number(match[2]));
+        }
+        if (start > end || start >= size) {
+          unlinkSync(outPath);
+          return reply
+            .code(416)
+            .header("content-range", `bytes */${size}`)
+            .send({ error: "range not satisfiable" });
+        }
+        reply.code(206).header("content-range", `bytes ${start}-${end}/${size}`);
+      }
+      reply.header("content-length", end - start + 1);
+
+      const stream = createReadStream(outPath, { start, end });
+      // The temp clip lives exactly as long as this response.
+      stream.once("close", () => {
+        try {
+          unlinkSync(outPath);
+        } catch {
+          // already gone
+        }
+      });
+      return reply.send(stream);
+    },
+  );
 
   /**
    * Local WHEP proxy so the browser UI never talks to go2rtc (:1984) directly.

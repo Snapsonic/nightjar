@@ -12,11 +12,24 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { CameraManager } from "../cameras/manager.js";
 import type { IdentityStore } from "../config/identity.js";
 import type { ConfigStore } from "../config/store.js";
+import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
+import type { Recorder } from "../recorder/recorder.js";
+import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
+import {
+  TIMELINE_BUCKET,
+  cleanupTimelineExports,
+  exportTimelineClip,
+  type TimelineStorage,
+} from "./timeline.js";
+import path from "node:path";
 
 type WhepOfferMessage = Extract<RealtimeMessage, { type: "whep_offer" }>;
 type SnapshotRequestMessage = Extract<RealtimeMessage, { type: "snapshot_request" }>;
+type TimelineDaysMessage = Extract<RealtimeMessage, { type: "timeline_days_request" }>;
+type TimelineCoverageMessage = Extract<RealtimeMessage, { type: "timeline_coverage_request" }>;
+type TimelineExportMessage = Extract<RealtimeMessage, { type: "timeline_export_request" }>;
 type DiskInfo = Extract<RealtimeMessage, { type: "status_reply" }>["disk"];
 
 const TokenResponse = z.object({
@@ -54,12 +67,15 @@ export interface CloudLinkDeps {
   identity: IdentityStore;
   cameras: CameraManager;
   go2rtc: Go2rtcSupervisor;
+  db: NodeDb;
+  recorder: Recorder;
   version: string;
   log: Logger;
 }
 
 const TOKEN_POLL_MS = 30_000;
 const HEARTBEAT_MS = 60_000;
+const TIMELINE_CLEANUP_MS = 6 * 3_600_000;
 const BACKOFF_START_MS = 1_000;
 const BACKOFF_CAP_MS = 60_000;
 
@@ -309,6 +325,21 @@ export class CloudLink {
     void sync();
     const unsubscribeConfig = this.deps.store.onChange(() => void sync());
 
+    // Prune our own stale timeline exports on session start and every 6h.
+    const timelineCleanup = async (): Promise<void> => {
+      try {
+        const removed = await cleanupTimelineExports(nodeId, this.timelineStorage(client));
+        if (removed > 0) this.log.info(`timeline cleanup removed ${removed} stale export(s)`);
+      } catch (err) {
+        this.log.warn(
+          `timeline cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void timelineCleanup();
+    const timelineCleanupTimer = setInterval(() => void timelineCleanup(), TIMELINE_CLEANUP_MS);
+    timelineCleanupTimer.unref();
+
     // Reconnect (fresh token + client) shortly before the token expires.
     const msLeft = Date.parse(token.expiresAt) - Date.now();
     const refreshIn = Math.max(10_000, msLeft - 5 * 60_000);
@@ -318,6 +349,7 @@ export class CloudLink {
     await endedPromise;
 
     clearInterval(heartbeatTimer);
+    clearInterval(timelineCleanupTimer);
     clearTimeout(refreshTimer);
     unsubscribeConfig();
     this.endSession = null;
@@ -390,6 +422,15 @@ export class CloudLink {
         break;
       case "status_request":
         await this.replyOrError(message.requestId, () => this.onStatusRequest(message.requestId));
+        break;
+      case "timeline_days_request":
+        await this.replyOrError(message.requestId, () => this.onTimelineDays(message));
+        break;
+      case "timeline_coverage_request":
+        await this.replyOrError(message.requestId, () => this.onTimelineCoverage(message));
+        break;
+      case "timeline_export_request":
+        await this.replyOrError(message.requestId, () => this.onTimelineExport(message));
         break;
       default:
         // Replies (possibly our own echoes) — nothing to do.
@@ -473,6 +514,88 @@ export class CloudLink {
       throw new LinkError("internal", `sign snapshot url: ${signError?.message ?? "no data"}`);
     }
     await this.send({ type: "snapshot_reply", requestId: message.requestId, url: data.signedUrl });
+  }
+
+  /* ---------- timeline (24/7 recording playback) ---------- */
+
+  /** Supabase-backed TimelineStorage for the "timeline-exports" bucket. */
+  private timelineStorage(client: NightjarClient): TimelineStorage {
+    const bucket = client.storage.from(TIMELINE_BUCKET);
+    return {
+      createSignedUrl: async (objectPath, ttlSec) => {
+        const { data, error } = await bucket.createSignedUrl(objectPath, ttlSec);
+        if (error || !data) return null;
+        return data.signedUrl;
+      },
+      upload: async (objectPath, body, contentType) => {
+        const { error } = await bucket.upload(objectPath, body, { contentType });
+        if (error) throw new Error(error.message);
+      },
+      list: async (prefix) => {
+        const { data, error } = await bucket.list(prefix, { limit: 1000 });
+        if (error || !data) throw new Error(error?.message ?? "storage list failed");
+        return data.map((obj) => ({ name: obj.name, createdAt: obj.created_at ?? null }));
+      },
+      remove: async (objectPaths) => {
+        const { error } = await bucket.remove(objectPaths);
+        if (error) throw new Error(error.message);
+      },
+    };
+  }
+
+  private requireCamera(cameraId: string): void {
+    if (!this.deps.cameras.get(cameraId)) {
+      throw new LinkError("camera_not_found", `unknown camera ${cameraId}`);
+    }
+  }
+
+  private async onTimelineDays(message: TimelineDaysMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    await this.send({
+      type: "timeline_days_reply",
+      requestId: message.requestId,
+      cameraId: message.cameraId,
+      days: this.deps.db.segmentDays(message.cameraId),
+    });
+  }
+
+  private async onTimelineCoverage(message: TimelineCoverageMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    const bounds = dayBoundsMs(message.day);
+    const rows = this.deps.db.segmentsBetween(message.cameraId, bounds.startMs, bounds.endMs);
+    await this.send({
+      type: "timeline_coverage_reply",
+      requestId: message.requestId,
+      cameraId: message.cameraId,
+      day: message.day,
+      spans: clipSpans(mergeCoverage(rows, Date.now()), bounds.startMs, bounds.endMs),
+    });
+  }
+
+  private async onTimelineExport(message: TimelineExportMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    const client = this.client;
+    const nodeId = this.getNodeId();
+    if (!client || !nodeId) throw new LinkError("internal", "cloud session not ready");
+
+    const range = clampExportRange(message.fromMs, message.toMs);
+    if (!range) throw new LinkError("internal", "invalid export range");
+    if (this.deps.recorder.segmentsBetween(message.cameraId, range.fromMs, range.toMs).length === 0) {
+      throw new LinkError("internal", "no recordings in that range");
+    }
+
+    const url = await exportTimelineClip({
+      nodeId,
+      cameraId: message.cameraId,
+      fromMs: range.fromMs,
+      toMs: range.toMs,
+      tmpDir: path.join(this.deps.store.get().paths.recordings, ".exports"),
+      storage: this.timelineStorage(client),
+      exportRange: async (fromMs, toMs, outPath) => {
+        await this.deps.recorder.exportRange(message.cameraId, fromMs, toMs, outPath);
+      },
+    });
+    await this.send({ type: "timeline_export_reply", requestId: message.requestId, url });
   }
 
   private async onStatusRequest(requestId: string): Promise<void> {

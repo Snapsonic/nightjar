@@ -161,6 +161,18 @@ export class NodeDb {
       .all(cutoffMs, limit) as SegmentRow[];
   }
 
+  /** Distinct node-local days (YYYY-MM-DD) with any segments for one camera, ascending. */
+  segmentDays(cameraId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT strftime('%Y-%m-%d', started_at / 1000, 'unixepoch', 'localtime') AS day
+           FROM segments WHERE camera_id = ? ORDER BY day ASC`,
+        )
+        .all(cameraId) as { day: string }[]
+    ).map((row) => row.day);
+  }
+
   /** Segments overlapping [t0Ms, t1Ms) for one camera, oldest first. */
   segmentsBetween(cameraId: string, t0Ms: number, t1Ms: number): SegmentRow[] {
     return this.db

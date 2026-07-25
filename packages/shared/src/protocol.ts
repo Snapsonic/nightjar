@@ -62,6 +62,55 @@ export const NodeStatusReply = z.object({
   disk: z.object({ usedBytes: z.number(), totalBytes: z.number() }).optional(),
 });
 
+/* ---------- timeline (24/7 recording playback) ---------- */
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export const TimelineDaysRequest = z.object({
+  type: z.literal("timeline_days_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+});
+
+export const TimelineDaysReply = z.object({
+  type: z.literal("timeline_days_reply"),
+  ...base,
+  cameraId: z.string().uuid(),
+  /** Node-local days (YYYY-MM-DD) with at least one recorded segment, ascending. */
+  days: z.array(z.string().regex(DAY_RE)),
+});
+
+export const TimelineCoverageRequest = z.object({
+  type: z.literal("timeline_coverage_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+  day: z.string().regex(DAY_RE),
+});
+
+export const TimelineCoverageReply = z.object({
+  type: z.literal("timeline_coverage_reply"),
+  ...base,
+  cameraId: z.string().uuid(),
+  day: z.string().regex(DAY_RE),
+  /** Merged recorded spans (unix ms; adjacent segments within 2s joined). */
+  spans: z.array(z.object({ startMs: z.number(), endMs: z.number() })),
+});
+
+export const TimelineExportRequest = z.object({
+  type: z.literal("timeline_export_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+  fromMs: z.number().int().nonnegative(),
+  toMs: z.number().int().nonnegative(),
+});
+
+export const TimelineExportReply = z.object({
+  type: z.literal("timeline_export_reply"),
+  ...base,
+  /** Signed Supabase Storage URL for the exported clip (1h TTL). */
+  url: z.string().url(),
+});
+
 export const ErrorReply = z.object({
   type: z.literal("error"),
   ...base,
@@ -76,6 +125,12 @@ export const RealtimeMessage = z.discriminatedUnion("type", [
   SnapshotReply,
   NodeStatusRequest,
   NodeStatusReply,
+  TimelineDaysRequest,
+  TimelineDaysReply,
+  TimelineCoverageRequest,
+  TimelineCoverageReply,
+  TimelineExportRequest,
+  TimelineExportReply,
   ErrorReply,
 ]);
 export type RealtimeMessage = z.infer<typeof RealtimeMessage>;

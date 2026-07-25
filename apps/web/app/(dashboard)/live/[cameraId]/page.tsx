@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LivePlayer } from "@/components/live-player";
 import { NodeStatusBadge } from "@/components/status-badge";
+import { TimelineHistory } from "@/components/timeline-history";
 import { createClient } from "@/lib/supabase/server";
 import { isNodeOnline, toNodeStatus } from "@/lib/utils";
 
@@ -76,6 +77,8 @@ export default async function LivePage({
           <LivePlayer cameraId={camera.id} nodeId={camera.node_id} nodeOnline={online} />
         )}
       </div>
+
+      <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} />
     </>
   );
 }
