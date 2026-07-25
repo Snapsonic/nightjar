@@ -284,7 +284,7 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
     let res: Response;
     try {
       res = await fetch(
-        `${deps.go2rtc.apiUrl()}/api/whep?src=${encodeURIComponent(go2rtcStreamName(camera.id))}`,
+        `${deps.go2rtc.apiUrl()}/api/webrtc?src=${encodeURIComponent(go2rtcStreamName(camera.id))}`,
         {
           method: "POST",
           headers: { "content-type": "application/sdp" },

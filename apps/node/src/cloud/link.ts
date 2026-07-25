@@ -426,7 +426,7 @@ export class CloudLink {
 
     let res: Response;
     try {
-      res = await fetch(`${this.deps.go2rtc.apiUrl()}/api/whep?src=${encodeURIComponent(src)}`, {
+      res = await fetch(`${this.deps.go2rtc.apiUrl()}/api/webrtc?src=${encodeURIComponent(src)}`, {
         method: "POST",
         headers: { "content-type": "application/sdp" },
         body: message.sdp,
