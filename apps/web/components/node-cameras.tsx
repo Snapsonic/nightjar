@@ -21,7 +21,7 @@ type SnapshotState =
 
 /**
  * Grid of camera cards for one node. Shares a single realtime channel to
- * request a fresh snapshot per camera (10s timeout each).
+ * request a fresh snapshot per camera (30s timeout — cold streams start slow).
  */
 export function NodeCameras({
   nodeId,

@@ -200,9 +200,12 @@ export class NodeChannel {
   }
 
   /** Asks the node for a fresh camera snapshot; resolves to a signed image URL. */
+  /** Cold camera streams (e.g. Nest via SDM after Google expires a stream
+   *  URL) can take 15–25s to deliver a first frame, so snapshots wait longer
+   *  than ordinary requests. */
   async requestSnapshot(
     cameraId: string,
-    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+    timeoutMs: number = 30_000,
   ): Promise<string> {
     const reply = await this.request(
       { type: "snapshot_request", cameraId },
