@@ -390,8 +390,10 @@ export class EventPipeline {
       } catch (err) {
         this.deps.db.bumpUploadAttempts(job.id);
         // Dead-letter poisoned jobs: the queue is serial, so one job that can
-        // never succeed blocks every event behind it forever.
-        if (job.attempts + 1 >= UPLOAD_MAX_ATTEMPTS) {
+        // never succeed blocks every event behind it forever. Missing clip
+        // files are unrecoverable — abandon immediately instead of retrying.
+        const unrecoverable = (err as NodeJS.ErrnoException).code === "ENOENT";
+        if (unrecoverable || job.attempts + 1 >= UPLOAD_MAX_ATTEMPTS) {
           this.deps.log.error(
             `upload of event ${job.event_id} abandoned after ${job.attempts + 1} attempts: ` +
               `${err instanceof Error ? err.message : String(err)} — clip stays local`,
