@@ -43,6 +43,12 @@ const EVENT_MAX_AGE_MS = 30 * 86_400_000;
 export const PRUNE_FLOOR_MS = 24 * 3_600_000;
 /** Throttle for repeated prune-time error/warn logs. */
 const PRUNE_LOG_THROTTLE_MS = 3_600_000;
+/**
+ * How many recent segments a snapshot may fall back through. The newest is
+ * still being written, so one spare is the common case; three covers a camera
+ * that just restarted mid-segment without reaching for stale footage.
+ */
+const SNAPSHOT_SEGMENT_CANDIDATES = 3;
 /** Emergency (disk-full) prunes are rate-limited to one per this interval. */
 const EMERGENCY_PRUNE_MIN_INTERVAL_MS = 30_000;
 
@@ -232,13 +238,24 @@ export class Recorder {
    */
   async latestFrame(cameraId: string, maxAgeMs = 120_000): Promise<Buffer | null> {
     const segments = this.db.segmentsBetween(cameraId, Date.now() - maxAgeMs, Date.now());
-    const newest = segments.at(-1);
-    if (!newest) return null;
+    // Newest first, but do not stop at the newest: the current segment is still
+    // being written and a freshly opened one often has no decodable frame yet,
+    // which is what produced empty snapshots. Fall back through the previous
+    // segments — a frame a minute old beats no frame at all.
+    for (const segment of segments.slice(-SNAPSHOT_SEGMENT_CANDIDATES).reverse()) {
+      const frame = await this.extractFrame(segment.path);
+      if (frame) return frame;
+    }
+    return null;
+  }
+
+  /** Most recent decodable frame in one segment file, or null. */
+  private async extractFrame(file: string): Promise<Buffer | null> {
     try {
       const { stdout } = await execFileAsync(
         "ffmpeg",
         // -sseof seeks from the end: the most recent decodable frame.
-        ["-nostdin", "-loglevel", "error", "-sseof", "-3", "-i", newest.path,
+        ["-nostdin", "-loglevel", "error", "-sseof", "-3", "-i", file,
          "-frames:v", "1", "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
         { timeout: 15_000, maxBuffer: 12 * 1024 * 1024, encoding: "buffer" },
       );
