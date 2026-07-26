@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { StreamStartGate } from "../backoff.js";
 import type { Logger } from "../log.js";
 import { NestCommandError, type NestBridge } from "./sdm.js";
-import { NestStreamManager, withAuthToken } from "./streams.js";
+import { NestStreamManager, withAuthToken, type StreamChange } from "./streams.js";
 
 const silent: Logger = {
   info: () => {},
@@ -140,4 +140,16 @@ test("acquire after stopAll refuses instead of minting an orphan stream", async 
   mgr.stopAll();
   await assert.rejects(() => mgr.acquire("cam-1", "dev-1"));
   assert.equal(calls.length, 0);
+});
+
+test("a new stream reports 'generated' so consumers get repointed", async () => {
+  const { bridge } = bridgeStub(() => generateResult());
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+  const seen: StreamChange[] = [];
+  mgr.onChange((c) => seen.push(c));
+
+  await mgr.acquire("cam-1", "dev-1");
+
+  assert.deepEqual(seen, [{ cameraId: "cam-1", reason: "generated" }]);
+  mgr.stopAll();
 });

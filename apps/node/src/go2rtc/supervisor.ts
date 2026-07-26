@@ -191,8 +191,23 @@ export class Go2rtcSupervisor {
     return `${lines.join("\n")}\n`;
   }
 
+  /**
+   * Rewrite go2rtc.yaml without restarting go2rtc.
+   *
+   * For changes a running go2rtc does not need to see immediately — currently
+   * Nest stream-token rotation. The token in an already-established RTSP
+   * session is irrelevant (it only authenticates the initial DESCRIBE), so
+   * restarting would tear down five healthy captures to apply something that
+   * changes nothing. The file still has to be current, because a go2rtc that
+   * restarts for any other reason reads it: renewal runs well inside the
+   * token's lifetime, so what is on disk is always still valid.
+   */
+  async refreshConfig(): Promise<void> {
+    await this.sync(false);
+  }
+
   /** Render the yaml; if it changed on disk, write atomically and ask go2rtc to restart. */
-  private async sync(): Promise<void> {
+  private async sync(restart = true): Promise<void> {
     const file = path.join(this.configDir, "go2rtc.yaml");
     const next = this.render(this.store.get());
 
@@ -219,6 +234,7 @@ export class Go2rtcSupervisor {
     renameSync(tmp, file);
     this.log.info(`wrote ${file}`);
 
+    if (!restart) return;
     if (!(await this.pokeRestart())) {
       this.log.warn("go2rtc restart request failed (is go2rtc running?) — will retry");
       this.retryRestartPoke();

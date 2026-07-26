@@ -57,9 +57,26 @@ async function main(): Promise<void> {
   );
   await go2rtc.start();
   nest.onChange(() => void go2rtc.resync());
-  // A new URL only appears when a stream is minted or its token rotates, so
-  // this re-render is rare and does not disturb established captures.
-  nestStreams.onChange(() => void go2rtc.resync());
+  // Startup mints a stream per camera within a few seconds of each other, and
+  // one restart per stream would churn every capture on the way up. Collapse a
+  // burst into a single restart.
+  let go2rtcRestart: NodeJS.Timeout | null = null;
+  nestStreams.onChange((change) => {
+    // A token rotation must reach the config file but must NOT restart go2rtc:
+    // renewal happens every few minutes per camera, and restarting on each one
+    // tore down every capture roughly every 40 seconds. Only a brand new
+    // stream — whose old session is already dead — is worth a restart.
+    if (change.reason === "renewed") {
+      void go2rtc.refreshConfig();
+      return;
+    }
+    if (go2rtcRestart) clearTimeout(go2rtcRestart);
+    go2rtcRestart = setTimeout(() => {
+      go2rtcRestart = null;
+      void go2rtc.resync();
+    }, 5_000);
+    go2rtcRestart.unref();
+  });
 
   const syncNestStreams = (): void => {
     void nestStreams.syncCameras(
@@ -151,6 +168,7 @@ async function main(): Promise<void> {
         pipeline.stop();
         nest.stopProbe();
         clearInterval(nestReconcile);
+        if (go2rtcRestart) clearTimeout(go2rtcRestart);
         nestStreams.stopAll();
         go2rtc.stop();
         // Wait for every capture/decoder child to actually exit (3s cap each)

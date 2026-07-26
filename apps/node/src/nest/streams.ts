@@ -71,9 +71,19 @@ export function withAuthToken(url: string, token: string): string {
   }
 }
 
+/**
+ * Why a stream URL changed.
+ *
+ * `generated` means a brand new stream: any existing RTSP session for that
+ * camera is dead, so consumers must be pointed at the new URL. `renewed`
+ * means only the auth token rotated — established sessions keep flowing and
+ * restarting them would cause an outage to apply a no-op.
+ */
+export type StreamChange = { cameraId: string; reason: "generated" | "renewed" };
+
 export class NestStreamManager {
   private readonly streams = new Map<string, StreamState>();
-  private readonly emitter = new Emitter<void>();
+  private readonly emitter = new Emitter<StreamChange>();
   private stopped = false;
 
   constructor(
@@ -116,7 +126,7 @@ export class NestStreamManager {
   }
 
   /** Fires whenever a camera's stream URL changes (callers re-render config). */
-  onChange(listener: () => void): () => void {
+  onChange(listener: (change: StreamChange) => void): () => void {
     return this.emitter.on(listener);
   }
 
@@ -187,7 +197,7 @@ export class NestStreamManager {
       `nest stream generated for camera ${cameraId} (expires in ` +
         `${Math.round((state.expiresAtMs - Date.now()) / 1000)}s)`,
     );
-    this.emitter.emit();
+    this.emitter.emit({ cameraId, reason: "generated" });
     return url;
   }
 
@@ -248,7 +258,7 @@ export class NestStreamManager {
       this.scheduleRenew(cameraId);
       // Only notify when the URL actually moved: consumers rewrite config on
       // this signal, and a needless rewrite would restart healthy captures.
-      if (changed) this.emitter.emit();
+      if (changed) this.emitter.emit({ cameraId, reason: "renewed" });
     } catch (err) {
       const rateLimited = err instanceof NestCommandError && err.isRateLimited;
       this.log.warn(
