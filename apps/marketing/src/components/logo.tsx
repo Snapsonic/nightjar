@@ -1,72 +1,44 @@
 type LogoMarkProps = {
-  /** Unique per instance so <mask> ids never collide when the logo appears twice on a page. */
-  idPrefix: string;
+  /** Kept for call-site compatibility; the mark no longer uses <mask> ids. */
+  idPrefix?: string;
   className?: string;
 };
 
 /**
- * The Nightjar mark: a crescent moon over a nightjar perched lengthwise on a
- * branch — the way real nightjars sit — with a single ember eye.
+ * The Nightjar mark: a nightjar perched in silhouette against a full amber
+ * moon, with a single ember eye. Canonical across the marketing site, the app,
+ * the docs, and every favicon — the bird is cut from the night background, so
+ * the mark only needs one accent color and stays legible at 16px.
+ *
+ * The crescent is a plain path (not a masked circle) so it also renders in
+ * Satori for OpenGraph images, which has no <mask> support.
  */
-export function LogoMark({ idPrefix, className }: LogoMarkProps) {
-  const maskId = `${idPrefix}-crescent`;
+export function LogoMark({ className }: LogoMarkProps) {
   return (
-    <svg
-      viewBox="0 0 64 64"
-      className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
-      <mask id={maskId}>
-        <rect width="64" height="64" fill="white" />
-        {/* offset circle carves the crescent */}
-        <circle cx="50" cy="10" r="11" fill="black" />
-      </mask>
-      {/* crescent moon */}
-      <circle
-        cx="45"
-        cy="14"
-        r="10.5"
-        fill="currentColor"
-        opacity="0.9"
-        mask={`url(#${maskId})`}
-      />
-      {/* nightjar, perched lengthwise: blunt head left, long tapered tail right */}
-      <path
-        d="M12 45.5
-           C12.5 37.5 18 32.5 25 32.5
-           C30.5 32.5 35 35.5 36.5 39.5
-           L56 43.5 L36.5 47.5
-           C33.5 51.5 28.5 53.5 22.5 53.5
-           L14 53.5
-           C13 50.5 12 48.5 12 45.5 Z"
-        fill="currentColor"
-      />
-      {/* the ember eye */}
-      <circle cx="21" cy="40.5" r="2" fill="var(--color-ember-500)" />
-      {/* the branch */}
-      <path
-        d="M4 55.5 c 14 -2.5 42 -2.5 56 0.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        opacity="0.55"
-      />
+    <svg viewBox="0 0 64 64" className={className} aria-hidden="true" focusable="false">
+      <circle cx="32" cy="32" r="27" fill="var(--color-ember-500)" />
+      <g fill="var(--color-night-950)">
+        <path d="M30 50 L12.5 44 L28 38 Z" />
+        <path d="M27 50 Q27 30 45 27 Q55.5 25.5 56 34 Q56.5 42.5 45 47.5 Q36.5 50.5 27 50 Z" />
+        <circle cx="50.5" cy="21.5" r="7" />
+        <path d="M56 19 L63.5 21.5 L56 24 Z" />
+      </g>
+      <circle cx="52" cy="20" r="2.1" fill="var(--color-ember-500)" />
     </svg>
   );
 }
 
 type WordmarkProps = {
-  idPrefix: string;
+  /** Kept for call-site compatibility. */
+  idPrefix?: string;
   className?: string;
 };
 
 /** Mark + wordmark lockup used in the nav and footer. */
-export function Wordmark({ idPrefix, className }: WordmarkProps) {
+export function Wordmark({ className }: WordmarkProps) {
   return (
     <span className={`inline-flex items-center gap-2.5 ${className ?? ""}`}>
-      <LogoMark idPrefix={idPrefix} className="h-7 w-7 text-ink-100" />
+      <LogoMark className="h-7 w-7" />
       <span className="text-[1.05rem] font-semibold tracking-tight text-ink-100">
         Nightjar
       </span>

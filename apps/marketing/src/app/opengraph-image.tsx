@@ -26,25 +26,16 @@ export default function OpengraphImage() {
         {/* mark + wordmark */}
         <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
           <svg width="88" height="88" viewBox="0 0 64 64">
-            {/* crescent drawn as a single two-arc path — Satori has no <mask> support */}
+            {/* canonical mark — plain shapes only (Satori has no <mask>) */}
+            <circle cx="32" cy="32" r="27" fill="#f0a441" />
+            <path d="M30 50 L12.5 44 L28 38 Z" fill="#0a0c13" />
             <path
-              d="M46 3.5 A 10.5 10.5 0 1 0 55.5 17 A 8.5 8.5 0 0 1 46 3.5 Z"
-              fill="#ece9e1"
-              opacity="0.9"
+              d="M27 50 Q27 30 45 27 Q55.5 25.5 56 34 Q56.5 42.5 45 47.5 Q36.5 50.5 27 50 Z"
+              fill="#0a0c13"
             />
-            <path
-              d="M12 45.5C12.5 37.5 18 32.5 25 32.5C30.5 32.5 35 35.5 36.5 39.5L56 43.5L36.5 47.5C33.5 51.5 28.5 53.5 22.5 53.5L14 53.5C13 50.5 12 48.5 12 45.5Z"
-              fill="#ece9e1"
-            />
-            <circle cx="21" cy="40.5" r="2" fill="#f0a441" />
-            <path
-              d="M4 55.5c14-2.5 42-2.5 56 0.5"
-              fill="none"
-              stroke="#ece9e1"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              opacity="0.55"
-            />
+            <circle cx="50.5" cy="21.5" r="7" fill="#0a0c13" />
+            <path d="M56 19 L63.5 21.5 L56 24 Z" fill="#0a0c13" />
+            <circle cx="52" cy="20" r="2.1" fill="#f0a441" />
           </svg>
           <div style={{ fontSize: 54, fontWeight: 600, letterSpacing: -1.5 }}>
             Nightjar

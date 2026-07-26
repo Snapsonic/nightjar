@@ -12,7 +12,7 @@ export class EdgeFunctionError extends Error {
   }
 }
 
-type EdgeFunctionName = "node-claim" | "turn-credentials";
+type EdgeFunctionName = "node-claim" | "turn-credentials" | "share-clip" | "caption-clip";
 
 function extractErrorMessage(payload: unknown, status: number): string {
   if (

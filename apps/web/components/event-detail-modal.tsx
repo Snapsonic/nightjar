@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { EventRow } from "@/components/events-feed";
 import { KindIcon } from "@/components/icons";
+import { SharePanel } from "@/components/share-panel";
 import { getBrowserClient } from "@/lib/supabase/client";
 import { formatDateTime, formatScore, toEventKind } from "@/lib/utils";
 
@@ -39,6 +40,7 @@ export function EventDetailModal({
   onClose: () => void;
 }) {
   const [clip, setClip] = useState<ClipState>({ status: "loading" });
+  const [showShare, setShowShare] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -156,14 +158,36 @@ export function EventDetailModal({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg border border-night-500 px-3 py-1.5 text-xs font-medium text-fog-300 transition-colors hover:border-fog-500 hover:text-fog-100"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            {event.clip_status === "uploaded" && (
+              <button
+                type="button"
+                onClick={() => setShowShare((open) => !open)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  showShare
+                    ? "border-ember-500/60 bg-ember-500/15 text-ember-300"
+                    : "border-night-500 text-fog-300 hover:border-fog-500 hover:text-fog-100"
+                }`}
+              >
+                Share
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-night-500 px-3 py-1.5 text-xs font-medium text-fog-300 transition-colors hover:border-fog-500 hover:text-fog-100"
+            >
+              Close
+            </button>
+          </div>
         </div>
+
+        {showShare && (
+          <SharePanel
+            eventId={event.id}
+            clipUrl={clip.status === "ready" ? clip.url : null}
+          />
+        )}
       </div>
     </div>
   );

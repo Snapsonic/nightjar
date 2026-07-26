@@ -3,9 +3,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { Database } from "@nightjar/db";
 import { getSupabaseEnv } from "@/lib/env";
 
-/** Paths reachable without a session. */
+/** Paths reachable without a session. /s/<token> is the public clip-share page. */
 function isPublicPath(pathname: string): boolean {
-  return pathname.startsWith("/login") || pathname.startsWith("/auth");
+  return (
+    pathname.startsWith("/login") || pathname.startsWith("/auth") || pathname.startsWith("/s/")
+  );
 }
 
 /**

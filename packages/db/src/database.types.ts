@@ -58,6 +58,57 @@ export type Database = {
           },
         ]
       }
+      clip_shares: {
+        Row: {
+          caption: string | null
+          created_at: string | null
+          event_id: string
+          expires_at: string
+          id: string
+          owner_id: string
+          revoked_at: string | null
+          token: string
+          view_count: number
+        }
+        Insert: {
+          caption?: string | null
+          created_at?: string | null
+          event_id: string
+          expires_at: string
+          id?: string
+          owner_id: string
+          revoked_at?: string | null
+          token: string
+          view_count?: number
+        }
+        Update: {
+          caption?: string | null
+          created_at?: string | null
+          event_id?: string
+          expires_at?: string
+          id?: string
+          owner_id?: string
+          revoked_at?: string | null
+          token?: string
+          view_count?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "clip_shares_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "clip_shares_owner_id_fkey"
+            columns: ["owner_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       event_clips: {
         Row: {
           bytes: number | null

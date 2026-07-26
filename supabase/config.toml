@@ -6,3 +6,11 @@
 
 [functions.notify]
 verify_jwt = false
+
+# share-view resolves public clip-share tokens for anonymous viewers of
+# https://nightjar.ca/s/<token> — no Authorization header, so JWT verification
+# is off. Expiry/revocation are enforced inside the function (service role).
+# Orchestrator: deploy with `supabase functions deploy share-view` from repo
+# root so this file is picked up (or pass --no-verify-jwt explicitly).
+[functions.share-view]
+verify_jwt = false

@@ -1,6 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#0b0c0f"/>
-  <circle cx="32" cy="32" r="17" fill="#f0ab3c"/>
-  <circle cx="32" cy="32" r="8.5" fill="#0b0c0f"/>
-  <circle cx="35.5" cy="28.5" r="2.6" fill="#fadd9e"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Nightjar">
+<circle cx="32" cy="32" r="27" fill="#f0a441"/>
+  <g fill="#0a0c13">
+    <path d="M30 50 L12.5 44 L28 38 Z"/>
+    <path d="M27 50 Q27 30 45 27 Q55.5 25.5 56 34 Q56.5 42.5 45 47.5 Q36.5 50.5 27 50 Z"/>
+    <circle cx="50.5" cy="21.5" r="7"/>
+    <path d="M56 19 L63.5 21.5 L56 24 Z"/>
+  </g>
+  <circle cx="52" cy="20" r="2.1" fill="#f0a441"/>
 </svg>
