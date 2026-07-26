@@ -18,6 +18,7 @@ import { go2rtcStreamName } from "@nightjar/shared";
 import type { DetectWorker } from "../detect/worker.js";
 import type { Logger } from "../log.js";
 import type { MotionDetector, MotionEvent } from "../motion/detector.js";
+import { detectionInZones, zoneIdsForBox } from "../motion/zones.js";
 import type { Recorder } from "../recorder/recorder.js";
 
 const execFileAsync = promisify(execFile);
@@ -57,6 +58,9 @@ interface OpenEvent {
   endedAtMs: number | null;
   changedFraction: number;
   detections: Detection[];
+  /** Zones that triggered: detection centers first, motion-mask attribution
+   *  for motion-only events. Empty when the camera has no zones. */
+  zoneIds: Set<string>;
   closeTimer: NodeJS.Timeout | null;
   redetectTimer: NodeJS.Timeout | null;
 }
@@ -129,6 +133,7 @@ export class EventPipeline {
           existing.closeTimer = null;
           existing.endedAtMs = null;
         }
+        if (event.zoneId !== undefined) existing.zoneIds.add(event.zoneId);
         void this.runDetect(existing);
         return;
       }
@@ -141,6 +146,7 @@ export class EventPipeline {
         endedAtMs: null,
         changedFraction: event.changedFraction,
         detections: [],
+        zoneIds: new Set(event.zoneId !== undefined ? [event.zoneId] : []),
         closeTimer: null,
         redetectTimer: null,
       };
@@ -200,15 +206,31 @@ export class EventPipeline {
     }
   }
 
-  /** Snapshot -> detect worker -> merge detections and upgrade kind/score. */
+  /** Snapshot -> detect worker -> zone filter -> merge detections and upgrade
+   *  kind/score. With zones configured, a detection only counts when its box
+   *  center falls inside a zone polygon. */
   private async runDetect(candidate: OpenEvent): Promise<void> {
     try {
       const jpeg = await this.fetchSnapshot(candidate.cameraId);
       if (!jpeg) return;
-      const detections = (await this.deps.detect.detect(jpeg)).filter(
+      const zones =
+        this.deps.store.get().cameras.find((c) => c.id === candidate.cameraId)?.zones ?? [];
+      const scored = (await this.deps.detect.detect(jpeg)).filter(
         (d) => d.score >= MIN_DETECTION_SCORE,
       );
+      const detections = scored.filter((d) => detectionInZones(d, zones));
+      const dropped = scored.length - detections.length;
+      if (dropped > 0) {
+        this.deps.log.info(
+          `event ${candidate.id}: ${dropped} detection(s) outside activity zones ignored`,
+        );
+      }
       if (detections.length === 0) return;
+      for (const detection of detections) {
+        if (detection.box) {
+          for (const zoneId of zoneIdsForBox(detection.box, zones)) candidate.zoneIds.add(zoneId);
+        }
+      }
       candidate.detections.push(...detections);
       for (const detection of detections) {
         if (KIND_PRIORITY[detection.kind] > KIND_PRIORITY[candidate.kind]) {
@@ -265,6 +287,7 @@ export class EventPipeline {
       metadata: {
         changedFraction: candidate.changedFraction,
         detections: candidate.detections,
+        ...(candidate.zoneIds.size > 0 ? { zoneIds: [...candidate.zoneIds] } : {}),
         ...(hasClip ? { clipStartMs, clipEndMs, durationS: (clipEndMs - clipStartMs) / 1000 } : {}),
       },
     };

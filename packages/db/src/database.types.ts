@@ -24,6 +24,7 @@ export type Database = {
           model: string | null
           name: string
           node_id: string
+          zones: Json
         }
         Insert: {
           capabilities?: Json
@@ -34,6 +35,7 @@ export type Database = {
           model?: string | null
           name: string
           node_id: string
+          zones?: Json
         }
         Update: {
           capabilities?: Json
@@ -44,6 +46,7 @@ export type Database = {
           model?: string | null
           name?: string
           node_id?: string
+          zones?: Json
         }
         Relationships: [
           {

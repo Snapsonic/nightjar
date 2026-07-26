@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_ZONES_PER_CAMERA, Zone } from "./camera";
 
 /**
  * Messages exchanged over the per-node Supabase Realtime channel
@@ -126,6 +127,25 @@ export const TimelineExportReply = z.object({
   url: z.string().url(),
 });
 
+/* ---------- activity zones ---------- */
+
+/** Replace a camera's activity zones (the web editor's save path). The node
+ *  validates with the shared Zone schema, persists via the camera manager and
+ *  rebuilds its motion masks; the zones also ride along on the next camera
+ *  row sync to the cloud. */
+export const UpdateZonesRequest = z.object({
+  type: z.literal("update_zones_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+  zones: z.array(Zone).max(MAX_ZONES_PER_CAMERA),
+});
+
+export const UpdateZonesReply = z.object({
+  type: z.literal("update_zones_reply"),
+  ...base,
+  ok: z.literal(true),
+});
+
 export const ErrorReply = z.object({
   type: z.literal("error"),
   ...base,
@@ -148,6 +168,8 @@ export const RealtimeMessage = z.discriminatedUnion("type", [
   TimelinePreviewReply,
   TimelineExportRequest,
   TimelineExportReply,
+  UpdateZonesRequest,
+  UpdateZonesReply,
   ErrorReply,
 ]);
 export type RealtimeMessage = z.infer<typeof RealtimeMessage>;

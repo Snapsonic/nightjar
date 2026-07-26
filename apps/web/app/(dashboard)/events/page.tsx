@@ -10,7 +10,7 @@ export default async function EventsPage() {
   const supabase = await createClient();
   const { data: cameras, error } = await supabase
     .from("cameras")
-    .select("id, name")
+    .select("id, name, zones")
     .order("name", { ascending: true });
 
   if (error) {

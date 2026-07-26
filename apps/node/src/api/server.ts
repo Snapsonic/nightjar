@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
-import { CameraPublic, go2rtcStreamName, type CameraConfig } from "@nightjar/shared";
+import {
+  CameraPublic,
+  MAX_ZONES_PER_CAMERA,
+  Zone,
+  go2rtcStreamName,
+  type CameraConfig,
+} from "@nightjar/shared";
 import type { GdriveBackup } from "../backup/gdrive.js";
 import type { CameraManager } from "../cameras/manager.js";
 import type { CloudLink } from "../cloud/link.js";
@@ -47,6 +53,8 @@ const AddCameraBody = z
   });
 
 const ToggleBackupBody = z.object({ enabled: z.boolean() });
+
+const UpdateZonesBody = z.object({ zones: z.array(Zone).max(MAX_ZONES_PER_CAMERA) });
 
 const NestCredentialsBody = z.object({
   projectId: z.string().min(1).max(200),
@@ -151,6 +159,23 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       return reply.code(404).send({ error: "camera not found" });
     }
     return reply.code(204).send();
+  });
+
+  /**
+   * Local mirror of the realtime update_zones command (LAN editing without the
+   * cloud, and testability). Replaces the camera's activity zones; the config
+   * change fans out to the motion masks and (when linked) the cloud sync.
+   */
+  app.post<{ Params: { id: string } }>("/api/cameras/:id/zones", async (req, reply) => {
+    const parsed = UpdateZonesBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: parsed.error.issues[0]?.message ?? "expected { zones: Zone[] }" });
+    }
+    const updated = deps.cameras.updateCamera(req.params.id, { zones: parsed.data.zones });
+    if (!updated) return reply.code(404).send({ error: "camera not found" });
+    return toPublic(updated, await deps.go2rtc.streams());
   });
 
   app.post<{ Params: { id: string } }>("/api/cameras/:id/probe", async (req, reply) => {

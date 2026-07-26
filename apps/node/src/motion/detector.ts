@@ -4,6 +4,7 @@ import { captureSubUrl } from "../cameras/streams.js";
 import { Emitter } from "../emitter.js";
 import type { ConfigStore } from "../config/store.js";
 import type { Logger } from "../log.js";
+import { buildZoneMasks, diffFrame, topZoneId, type ZoneMasks } from "./zones.js";
 
 /** Analysis frame geometry — tiny grayscale frames off the substream. */
 export const FRAME_WIDTH = 320;
@@ -32,8 +33,12 @@ export type MotionEvent =
       type: "start";
       cameraId: string;
       atMs: number;
-      /** Fraction of pixels that differ from the rolling background (0..1). */
+      /** Fraction of active (zone-masked) pixels that differ from the rolling
+       *  background (0..1). Without zones the whole frame is active. */
       changedFraction: number;
+      /** Zone whose mask had the most changed pixels at trigger time; absent
+       *  when the camera has no zones configured. */
+      zoneId?: string;
     }
   | { type: "end"; cameraId: string; atMs: number };
 
@@ -49,6 +54,8 @@ interface CameraMotion {
   frame: Buffer;
   fill: number;
   bg: Float32Array | null;
+  /** Zone masks at analysis resolution; rebuilt when the zones config changes. */
+  masks: ZoneMasks;
   consecutive: number;
   active: boolean;
   lastMotionMs: number;
@@ -59,8 +66,10 @@ interface CameraMotion {
  * Motion detector. For each enabled camera with detect=true, one ffmpeg
  * decodes the substream (fallback: main) into 5 fps 320x180 grayscale raw
  * frames on stdout. A rolling background (bg = bg*0.95 + frame*0.05) is
- * compared per pixel; a frame is "motion" when >1.5% of pixels differ by
- * more than 25. motionStart after 2 consecutive motion frames (the event
+ * compared per pixel; a frame is "motion" when >1.5% of active pixels differ
+ * by more than 25. "Active" = inside the union of the camera's activity-zone
+ * masks (rasterized at 320x180, rebuilt on config change); with no zones the
+ * whole frame is active. motionStart after 2 consecutive motion frames (the event
  * pipeline then pulls a full-color go2rtc snapshot for object detection —
  * these gray analysis frames are too small/colorless for that); motionEnd
  * after 10s quiet.
@@ -99,7 +108,9 @@ export class MotionDetector {
         this.stop(cameraId);
         this.start(camera);
       } else {
+        const zonesChanged = JSON.stringify(camera.zones) !== JSON.stringify(cam.camera.zones);
         cam.camera = camera;
+        if (zonesChanged) this.rebuildMasks(cam);
       }
     }
     for (const camera of wanted.values()) {
@@ -120,11 +131,13 @@ export class MotionDetector {
       frame: Buffer.allocUnsafe(FRAME_BYTES),
       fill: 0,
       bg: null,
+      masks: buildZoneMasks(camera.zones, FRAME_WIDTH, FRAME_HEIGHT),
       consecutive: 0,
       active: false,
       lastMotionMs: 0,
       stderrTail: "",
     };
+    this.logMasks(cam);
     this.running.set(camera.id, cam);
     this.spawn(cam);
     // Safety net: end motion even if the stream stalls without exiting.
@@ -251,33 +264,44 @@ export class MotionDetector {
       cam.bg = bg;
       return;
     }
-    const bg = cam.bg;
-    let changed = 0;
-    for (let i = 0; i < FRAME_BYTES; i++) {
-      const value = frame[i] as number;
-      const prev = bg[i] as number;
-      const diff = value - prev;
-      if (diff > PIXEL_THRESHOLD || diff < -PIXEL_THRESHOLD) changed++;
-      bg[i] = prev + diff * ALPHA;
-    }
-    const fraction = changed / FRAME_BYTES;
+    const diff = diffFrame(frame, cam.bg, cam.masks, PIXEL_THRESHOLD, ALPHA);
     const now = Date.now();
-    if (fraction > TRIGGER_FRACTION) {
+    if (diff.changedFraction > TRIGGER_FRACTION) {
       cam.consecutive++;
       cam.lastMotionMs = now;
       if (!cam.active && cam.consecutive >= START_FRAMES) {
         cam.active = true;
+        const zoneId = topZoneId(diff.perZoneChanged);
         this.emitter.emit({
           type: "start",
           cameraId: cam.camera.id,
           atMs: now,
-          changedFraction: fraction,
+          changedFraction: diff.changedFraction,
+          ...(zoneId !== null ? { zoneId } : {}),
         });
       }
     } else {
       cam.consecutive = 0;
       if (cam.active && now - cam.lastMotionMs >= QUIET_MS) this.endMotion(cam);
     }
+  }
+
+  /* ---------- activity zone masks ---------- */
+
+  /** Re-rasterize the camera's zone masks (config change, decoder untouched). */
+  private rebuildMasks(cam: CameraMotion): void {
+    cam.masks = buildZoneMasks(cam.camera.zones, FRAME_WIDTH, FRAME_HEIGHT);
+    this.logMasks(cam, "rebuilt");
+  }
+
+  private logMasks(cam: CameraMotion, verb = "built"): void {
+    const zones = cam.camera.zones;
+    this.log.info(
+      `motion mask ${verb} for camera ${cam.camera.id}: ` +
+        (zones.length === 0
+          ? `no zones — full frame active (${FRAME_BYTES} px)`
+          : `${zones.length} zone(s), ${cam.masks.activeCount}/${FRAME_BYTES} px active`),
+    );
   }
 
   /** Substream when configured, else the main stream (go2rtc restream for nest). */

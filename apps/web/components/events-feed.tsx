@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { EventKind } from "@nightjar/shared";
+import { z } from "zod";
+import { EventKind, Zone } from "@nightjar/shared";
 import type { Database } from "@nightjar/db";
 import { KindIcon } from "@/components/icons";
 import { EventDetailModal } from "@/components/event-detail-modal";
@@ -24,6 +25,22 @@ const KIND_LABELS: Record<EventKind, string> = {
 interface CameraRef {
   id: string;
   name: string;
+  /** zones jsonb synced from the node — used to resolve metadata.zoneIds. */
+  zones?: unknown;
+}
+
+/** metadata.zoneIds written by the node's event pipeline. */
+const ZoneIdsMeta = z.object({ zoneIds: z.array(z.string()) });
+
+function eventZoneNames(
+  metadata: unknown,
+  zoneNames: Map<string, string> | undefined,
+): string[] {
+  const parsed = ZoneIdsMeta.safeParse(metadata);
+  if (!parsed.success) return [];
+  // Resolve ids against the camera's current zones; fall back to the id so a
+  // renamed/deleted zone still shows something.
+  return parsed.data.zoneIds.map((id) => zoneNames?.get(id) ?? id);
 }
 
 export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
@@ -38,6 +55,13 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
   const [selected, setSelected] = useState<EventRow | null>(null);
 
   const cameraNames = new Map(cameras.map((c) => [c.id, c.name]));
+  const cameraZoneNames = new Map<string, Map<string, string>>();
+  for (const camera of cameras) {
+    const parsed = z.array(Zone).safeParse(camera.zones ?? []);
+    if (parsed.success && parsed.data.length > 0) {
+      cameraZoneNames.set(camera.id, new Map(parsed.data.map((zone) => [zone.id, zone.name])));
+    }
+  }
 
   const signThumbnails = useCallback(async (rows: EventRow[]) => {
     const paths = rows
@@ -176,6 +200,10 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
                 event.clip_status === "uploaded" && event.thumbnail_path
                   ? thumbs[event.thumbnail_path]
                   : undefined;
+              const zoneNames = eventZoneNames(
+                event.metadata,
+                cameraZoneNames.get(event.camera_id),
+              );
               return (
                 <li key={event.id}>
                   <button
@@ -193,6 +221,14 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
                         <span className="text-fog-300">
                           {cameraNames.get(event.camera_id) ?? "Unknown camera"}
                         </span>
+                        {zoneNames.map((name) => (
+                          <span
+                            key={name}
+                            className="ml-1.5 inline-block rounded-full border border-night-500 bg-night-700/60 px-2 py-px align-middle text-[10px] font-medium text-fog-300"
+                          >
+                            {name}
+                          </span>
+                        ))}
                       </span>
                       <span className="mt-0.5 block text-xs text-fog-500">
                         {relativeTime(event.started_at)} · confidence {formatScore(event.score)}

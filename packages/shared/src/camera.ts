@@ -22,6 +22,27 @@ export const CameraCapabilities = z.object({
 });
 export type CameraCapabilities = z.infer<typeof CameraCapabilities>;
 
+/** One polygon vertex in normalized 0..1 image coordinates ([x, y]). */
+export const ZonePoint = z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]);
+export type ZonePoint = z.infer<typeof ZonePoint>;
+
+/**
+ * Activity zone: a named polygon over the camera image. Only motion/detections
+ * inside a zone count. An empty zones list means the whole frame is active
+ * (the pre-zones behavior). "exclude" mode is reserved for later — the enum
+ * exists now so configs stay forward-compatible.
+ */
+export const Zone = z.object({
+  id: z.string().min(1).max(32),
+  name: z.string().min(1).max(40),
+  points: z.array(ZonePoint).min(3).max(20),
+  mode: z.enum(["include"]).default("include"),
+});
+export type Zone = z.infer<typeof Zone>;
+
+/** Sanity cap on zones per camera (protocol + editor enforce it too). */
+export const MAX_ZONES_PER_CAMERA = 16;
+
 /** Nest (Google Smart Device Management) camera binding. The device id is an
  *  opaque SDM identifier — not a credential (useless without the node's own
  *  OAuth grant), so it may appear in the CameraPublic projection. */
@@ -57,6 +78,10 @@ const CameraConfigBase = z.object({
   record: z.boolean().default(true),
   detect: z.boolean().default(true),
   capabilities: CameraCapabilities.default({}),
+  /** Activity zones. Empty (the default, and what legacy configs parse to)
+   *  means the whole frame is active. Not a credential — included in
+   *  CameraPublic and synced to the cloud so the web UI can edit them. */
+  zones: z.array(Zone).max(MAX_ZONES_PER_CAMERA).default([]),
 });
 
 export const CameraConfig = CameraConfigBase.superRefine((camera, ctx) => {

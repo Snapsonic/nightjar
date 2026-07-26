@@ -32,6 +32,7 @@ type TimelineDaysMessage = Extract<RealtimeMessage, { type: "timeline_days_reque
 type TimelineCoverageMessage = Extract<RealtimeMessage, { type: "timeline_coverage_request" }>;
 type TimelineExportMessage = Extract<RealtimeMessage, { type: "timeline_export_request" }>;
 type TimelinePreviewMessage = Extract<RealtimeMessage, { type: "timeline_preview_request" }>;
+type UpdateZonesMessage = Extract<RealtimeMessage, { type: "update_zones_request" }>;
 type DiskInfo = Extract<RealtimeMessage, { type: "status_reply" }>["disk"];
 
 const TokenResponse = z.object({
@@ -394,6 +395,7 @@ export class CloudLink {
       make: camera.make ?? null,
       model: camera.model ?? null,
       capabilities: JSON.parse(JSON.stringify(camera.capabilities)) as Json,
+      zones: JSON.parse(JSON.stringify(camera.zones)) as Json,
       enabled: camera.enabled,
     }));
     if (rows.length > 0) {
@@ -438,6 +440,9 @@ export class CloudLink {
         break;
       case "timeline_preview_request":
         await this.replyOrError(message.requestId, () => this.onTimelinePreview(message));
+        break;
+      case "update_zones_request":
+        await this.replyOrError(message.requestId, () => this.onUpdateZones(message));
         break;
       default:
         // Replies (possibly our own echoes) — nothing to do.
@@ -660,6 +665,20 @@ export class CloudLink {
     const url = await sign();
     if (!url) throw new LinkError("internal", "uploaded preview could not be signed");
     await this.send({ type: "timeline_preview_reply", requestId: message.requestId, url });
+  }
+
+  /** Replace a camera's activity zones (already validated by the shared Zone
+   *  schema during RealtimeMessage parsing). Persisting via the camera manager
+   *  triggers the config-change fanout: motion masks rebuild and the camera
+   *  row (zones included) re-syncs to the cloud. */
+  private async onUpdateZones(message: UpdateZonesMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    const updated = this.deps.cameras.updateCamera(message.cameraId, { zones: message.zones });
+    if (!updated) throw new LinkError("camera_not_found", `unknown camera ${message.cameraId}`);
+    this.log.info(
+      `zones updated for camera ${message.cameraId} (${message.zones.length} zone(s))`,
+    );
+    await this.send({ type: "update_zones_reply", requestId: message.requestId, ok: true });
   }
 
   private async onStatusRequest(requestId: string): Promise<void> {

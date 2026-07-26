@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { CameraCapabilities } from "@nightjar/shared";
+import { z } from "zod";
+import { CameraCapabilities, Zone } from "@nightjar/shared";
 import { LivePlayer } from "@/components/live-player";
+import { ZoneEditor } from "@/components/zone-editor";
 import { NodeStatusBadge } from "@/components/status-badge";
 import { TimelineHistory } from "@/components/timeline-history";
 import { createClient } from "@/lib/supabase/server";
@@ -32,7 +34,7 @@ export default async function LivePage({
   const supabase = await createClient();
   const { data: camera, error } = await supabase
     .from("cameras")
-    .select("id, node_id, name, enabled, capabilities")
+    .select("id, node_id, name, enabled, capabilities, zones")
     .eq("id", cameraId)
     .maybeSingle();
 
@@ -68,6 +70,11 @@ export default async function LivePage({
     ? parsedCapabilities.data
     : CameraCapabilities.parse({});
 
+  // Zones synced from the node (jsonb, additive). Rows written before the
+  // zones migration/node build parse to [].
+  const parsedZones = z.array(Zone).safeParse(camera.zones ?? []);
+  const zones = parsedZones.success ? parsedZones.data : [];
+
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -98,6 +105,13 @@ export default async function LivePage({
           />
         )}
       </div>
+
+      <ZoneEditor
+        cameraId={camera.id}
+        nodeId={camera.node_id}
+        nodeOnline={online}
+        initialZones={zones}
+      />
 
       <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} autoFocus={historyTab} />
     </>

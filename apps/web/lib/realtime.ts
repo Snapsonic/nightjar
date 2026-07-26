@@ -8,7 +8,9 @@ import {
   type TimelineDaysRequest,
   type TimelineExportRequest,
   type TimelinePreviewRequest,
+  type UpdateZonesRequest,
   type WhepOffer,
+  type Zone,
 } from "@nightjar/shared";
 import { REALTIME_SUBSCRIBE_STATES, type RealtimeChannel } from "@supabase/supabase-js";
 import type { z } from "zod";
@@ -46,7 +48,8 @@ type ReplyMessage = Extract<
       | "timeline_days_reply"
       | "timeline_coverage_reply"
       | "timeline_preview_reply"
-      | "timeline_export_reply";
+      | "timeline_export_reply"
+      | "update_zones_reply";
   }
 >;
 
@@ -58,7 +61,8 @@ type OutgoingRequest =
   | Omit<z.infer<typeof TimelineDaysRequest>, "requestId">
   | Omit<z.infer<typeof TimelineCoverageRequest>, "requestId">
   | Omit<z.infer<typeof TimelinePreviewRequest>, "requestId">
-  | Omit<z.infer<typeof TimelineExportRequest>, "requestId">;
+  | Omit<z.infer<typeof TimelineExportRequest>, "requestId">
+  | Omit<z.infer<typeof UpdateZonesRequest>, "requestId">;
 
 interface Pending {
   expect: readonly ReplyMessage["type"][];
@@ -167,7 +171,8 @@ export class NodeChannel {
       message.type === "timeline_days_request" ||
       message.type === "timeline_coverage_request" ||
       message.type === "timeline_preview_request" ||
-      message.type === "timeline_export_request"
+      message.type === "timeline_export_request" ||
+      message.type === "update_zones_request"
     ) {
       return;
     }
@@ -337,6 +342,20 @@ export class NodeChannel {
       timeoutMs,
     );
     return reply.url;
+  }
+
+  /** Replaces a camera's activity zones on the node; resolves once persisted
+   *  (the node also re-syncs the camera row to the cloud). */
+  async requestUpdateZones(
+    cameraId: string,
+    zones: Zone[],
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<void> {
+    await this.request(
+      { type: "update_zones_request", cameraId, zones },
+      ["update_zones_reply"],
+      timeoutMs,
+    );
   }
 
   /** Unsubscribes and rejects any in-flight requests. Safe to call twice. */

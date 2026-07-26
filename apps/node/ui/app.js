@@ -10,6 +10,50 @@ const cards = new Map();
 
 const el = (id) => document.getElementById(id);
 
+/* ---------------- activity zones (read-only display) ---------------- */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** Matches the web editor's palette so zones keep their colors everywhere. */
+const ZONE_COLORS = ["#f59e0b", "#38bdf8", "#a78bfa", "#34d399", "#f472b6", "#fb923c", "#60a5fa", "#facc15"];
+
+/**
+ * Translucent zone polygons over the live player. Read-only here — zones are
+ * edited from app.nightjar.ca. Normalized 0..1 points map onto a stretched
+ * 100x100 viewBox (assumes the video fills the 16:9 box, as 16:9 cameras do).
+ */
+function updateZoneOverlay(entry, zones) {
+  const list = Array.isArray(zones) ? zones : [];
+  const key = JSON.stringify(list);
+  if (entry.zoneKey !== key) {
+    entry.zoneKey = key;
+    entry.zoneSvg.textContent = "";
+    list.forEach((zone, i) => {
+      if (!Array.isArray(zone.points) || zone.points.length < 3) return;
+      const color = ZONE_COLORS[i % ZONE_COLORS.length];
+      const poly = document.createElementNS(SVG_NS, "polygon");
+      poly.setAttribute(
+        "points",
+        zone.points.map((p) => `${(p[0] * 100).toFixed(2)},${(p[1] * 100).toFixed(2)}`).join(" "),
+      );
+      poly.setAttribute("fill", `${color}30`);
+      poly.setAttribute("stroke", color);
+      poly.setAttribute("stroke-width", "0.5");
+      const title = document.createElementNS(SVG_NS, "title");
+      title.textContent = zone.name || "zone";
+      poly.append(title);
+      entry.zoneSvg.append(poly);
+    });
+    entry.zoneNote.textContent =
+      list.length > 0
+        ? `${list.length} zone${list.length === 1 ? "" : "s"} · edit at app.nightjar.ca`
+        : "";
+  }
+  // Hide while playing back history clips (the overlay describes live framing).
+  const show = list.length > 0 && !entry.historyPlaying;
+  entry.zoneSvg.classList.toggle("hidden", !show);
+  entry.zoneNote.classList.toggle("hidden", list.length === 0);
+}
+
 /* ---------------- WHEP player ---------------- */
 
 function waitForIceGathering(pc) {
@@ -558,7 +602,11 @@ function buildCameraCard(camera) {
   const overlay = document.createElement("div");
   overlay.className = "offline-overlay";
   overlay.textContent = "offline";
-  videoWrap.append(video, overlay);
+  const zoneSvg = document.createElementNS(SVG_NS, "svg");
+  zoneSvg.setAttribute("viewBox", "0 0 100 100");
+  zoneSvg.setAttribute("preserveAspectRatio", "none");
+  zoneSvg.classList.add("zone-overlay", "hidden");
+  videoWrap.append(video, zoneSvg, overlay);
 
   const meta = document.createElement("div");
   meta.className = "camera-meta";
@@ -572,7 +620,9 @@ function buildCameraCard(camera) {
   name.textContent = camera.name;
   const caps = document.createElement("span");
   caps.className = "camera-caps";
-  nameWrap.append(dot, name, caps);
+  const zoneNote = document.createElement("span");
+  zoneNote.className = "zone-note muted hidden";
+  nameWrap.append(dot, name, caps, zoneNote);
 
   const muteBtn = document.createElement("button");
   muteBtn.type = "button";
@@ -646,6 +696,9 @@ function buildCameraCard(camera) {
     dot,
     name,
     caps,
+    zoneSvg,
+    zoneNote,
+    zoneKey: null,
     timeline,
     muteBtn,
     talkBtn,
@@ -690,6 +743,7 @@ function renderCameras(status) {
     }
     entry.name.textContent = camera.name;
     entry.dot.className = `dot ${camera.online ? "dot-ok" : "dot-bad"}`;
+    updateZoneOverlay(entry, camera.zones);
     const c = camera.capabilities || {};
     // Older configs lack hasAudio — fall back to audioCodec presence.
     const hasAudio = c.hasAudio !== undefined ? c.hasAudio : !!c.audioCodec;

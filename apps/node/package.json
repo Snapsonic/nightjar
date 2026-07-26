@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "build": "tsc --noEmit",
+    "test": "tsx --test",
     "fetch-model": "node scripts/fetch-model.mjs"
   },
   "dependencies": {
