@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { EventKind } from "@nightjar/shared";
 import { getBrowserClient } from "@/lib/supabase/client";
+import { parseChannels, type ChannelPrefs } from "@/lib/utils";
 
 /* ---------- display name ---------- */
 
@@ -195,6 +196,272 @@ export function NotificationToggles({
       {error && (
         <p role="alert" className="mt-3 text-xs text-danger">
           {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ---------- notification channels ---------- */
+
+const E164_RE = /^\+[1-9]\d{7,14}$/;
+
+function ChannelSwitch({
+  on,
+  disabled,
+  label,
+  onToggle,
+}: {
+  on: boolean;
+  disabled: boolean;
+  label: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onToggle}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-60 ${
+        on ? "bg-ember-500" : "bg-night-500"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-night-950 transition-all ${
+          on ? "left-[22px]" : "left-0.5"
+        }`}
+      />
+    </button>
+  );
+}
+
+export function NotificationChannels({
+  userId,
+  initialChannels,
+  initialNotifyEmail,
+  initialNotifyPhone,
+  accountEmail,
+}: {
+  userId: string;
+  initialChannels: ChannelPrefs;
+  initialNotifyEmail: string;
+  initialNotifyPhone: string;
+  accountEmail: string;
+}) {
+  const [channels, setChannels] = useState<ChannelPrefs>(initialChannels);
+  const [busyChannel, setBusyChannel] = useState<"email" | "sms" | null>(null);
+  const [channelError, setChannelError] = useState<string | null>(null);
+
+  const [email, setEmail] = useState(initialNotifyEmail);
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailSaved, setEmailSaved] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  const [phone, setPhone] = useState(initialNotifyPhone);
+  const [savedPhone, setSavedPhone] = useState(initialNotifyPhone);
+  const [phoneBusy, setPhoneBusy] = useState(false);
+  const [phoneSaved, setPhoneSaved] = useState(false);
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+
+  async function toggleChannel(channel: "email" | "sms") {
+    const next = { ...channels, [channel]: !channels[channel] };
+    if (channel === "sms" && next.sms && !savedPhone) {
+      setChannelError("Add and save your phone number below before turning on SMS.");
+      return;
+    }
+
+    const previous = channels;
+    setChannels(next);
+    setBusyChannel(channel);
+    setChannelError(null);
+
+    // camera_id null = the global settings row; its uniqueness is enforced by
+    // a NULL-safe expression index that PostgREST upserts can't target — so
+    // select-then-write, merging into the existing channels jsonb.
+    const supabase = getBrowserClient();
+    const { data: existing, error: selectErr } = await supabase
+      .from("notification_settings")
+      .select("id, channels")
+      .eq("user_id", userId)
+      .is("camera_id", null)
+      .maybeSingle();
+    const merged: ChannelPrefs = {
+      ...parseChannels(existing?.channels),
+      [channel]: next[channel],
+    };
+    const { error: err } = selectErr
+      ? { error: selectErr }
+      : existing
+        ? await supabase
+            .from("notification_settings")
+            .update({ channels: merged })
+            .eq("id", existing.id)
+        : await supabase
+            .from("notification_settings")
+            .insert({ user_id: userId, camera_id: null, channels: merged });
+    setBusyChannel(null);
+    if (err) {
+      setChannels(previous); // roll back optimistic update
+      setChannelError(`Could not save: ${err.message}`);
+    }
+  }
+
+  async function saveEmail(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      setEmailError("Enter a valid email address, or leave blank to use your account email.");
+      return;
+    }
+    setEmailBusy(true);
+    setEmailSaved(false);
+    setEmailError(null);
+    const supabase = getBrowserClient();
+    const { error: err } = await supabase
+      .from("profiles")
+      .update({ notify_email: trimmed || null })
+      .eq("id", userId);
+    setEmailBusy(false);
+    if (err) setEmailError(err.message);
+    else setEmailSaved(true);
+  }
+
+  async function savePhone(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = phone.replace(/[\s()-]/g, "");
+    if (trimmed && !E164_RE.test(trimmed)) {
+      setPhoneError("Enter your number in international format, e.g. +16045551234.");
+      return;
+    }
+    setPhoneBusy(true);
+    setPhoneSaved(false);
+    setPhoneError(null);
+    const supabase = getBrowserClient();
+    const { error: err } = await supabase
+      .from("profiles")
+      .update({ notify_phone: trimmed || null })
+      .eq("id", userId);
+    setPhoneBusy(false);
+    if (err) {
+      setPhoneError(err.message);
+      return;
+    }
+    setPhone(trimmed);
+    setSavedPhone(trimmed);
+    setPhoneSaved(true);
+  }
+
+  const rowClass = "rounded-lg border border-night-600 bg-night-800 px-3.5 py-3";
+  const inputClass =
+    "w-full rounded-lg border border-night-500 bg-night-900 px-3 py-2 text-sm text-fog-100 placeholder:text-fog-500 outline-none transition-colors focus:border-ember-500";
+  const saveButtonClass =
+    "rounded-lg border border-night-500 px-3.5 py-2 text-sm font-medium text-fog-300 transition-colors hover:bg-night-800 disabled:opacity-60";
+
+  return (
+    <div className="space-y-2.5">
+      {/* Push: configured per device in its own card below. */}
+      <div className={`${rowClass} flex items-center justify-between gap-3`}>
+        <div>
+          <p className="text-sm text-fog-200">Push</p>
+          <p className="mt-0.5 text-xs text-fog-500">Enabled per device.</p>
+        </div>
+        <a
+          href="#push-devices"
+          className="text-xs font-medium text-ember-300 transition-colors hover:text-ember-200"
+        >
+          Manage devices
+        </a>
+      </div>
+
+      {/* Email */}
+      <div className={rowClass}>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-fog-200">Email</p>
+          <ChannelSwitch
+            on={channels.email}
+            disabled={busyChannel !== null}
+            label="Email alerts"
+            onToggle={() => void toggleChannel("email")}
+          />
+        </div>
+        <form onSubmit={saveEmail} className="mt-3 flex flex-wrap items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <label htmlFor="notify-email" className="mb-1.5 block text-xs font-medium text-fog-300">
+              Send to
+            </label>
+            <input
+              id="notify-email"
+              type="email"
+              value={email}
+              maxLength={254}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setEmailSaved(false);
+              }}
+              placeholder={accountEmail}
+              className={inputClass}
+            />
+          </div>
+          <button type="submit" disabled={emailBusy} className={saveButtonClass}>
+            {emailBusy ? "Saving…" : emailSaved ? "Saved" : "Save"}
+          </button>
+          <p className="w-full text-xs text-fog-500">Leave blank to use your account email.</p>
+          {emailError && (
+            <p role="alert" className="w-full text-xs text-danger">
+              {emailError}
+            </p>
+          )}
+        </form>
+      </div>
+
+      {/* SMS */}
+      <div className={rowClass}>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-fog-200">SMS</p>
+          <ChannelSwitch
+            on={channels.sms}
+            disabled={busyChannel !== null}
+            label="SMS alerts"
+            onToggle={() => void toggleChannel("sms")}
+          />
+        </div>
+        <form onSubmit={savePhone} className="mt-3 flex flex-wrap items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <label htmlFor="notify-phone" className="mb-1.5 block text-xs font-medium text-fog-300">
+              Phone number
+            </label>
+            <input
+              id="notify-phone"
+              type="tel"
+              value={phone}
+              maxLength={20}
+              required={channels.sms}
+              onChange={(e) => {
+                setPhone(e.target.value);
+                setPhoneSaved(false);
+              }}
+              placeholder="+16045551234"
+              className={inputClass}
+            />
+          </div>
+          <button type="submit" disabled={phoneBusy} className={saveButtonClass}>
+            {phoneBusy ? "Saving…" : phoneSaved ? "Saved" : "Save"}
+          </button>
+          <p className="w-full text-xs text-fog-500">Text alerts from +1 604 239 6146.</p>
+          {phoneError && (
+            <p role="alert" className="w-full text-xs text-danger">
+              {phoneError}
+            </p>
+          )}
+        </form>
+      </div>
+
+      {channelError && (
+        <p role="alert" className="text-xs text-danger">
+          {channelError}
         </p>
       )}
     </div>

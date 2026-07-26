@@ -19,6 +19,20 @@ async function main(): Promise<void> {
   const log = createLogger("node");
   log.info(`Nightjar node v${VERSION} starting`);
 
+  // Global guards: a stray rejection in a background worker must not take the
+  // whole NVR down; a truly unknown synchronous throw still exits (default
+  // Node contract) but only after the stack has hit the log.
+  process.on("unhandledRejection", (reason) => {
+    const message =
+      reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    log.error(`unhandled promise rejection (continuing): ${message}`);
+  });
+  process.on("uncaughtException", (err) => {
+    log.error(`uncaught exception: ${err.stack ?? err.message}`);
+    // Brief delay so stderr flushes even when piped, then keep the fatal exit.
+    setTimeout(() => process.exit(1), 100);
+  });
+
   const store = new ConfigStore(log.child("config"));
   const identity = new IdentityStore(log.child("identity"));
   const db = new NodeDb();
@@ -26,6 +40,7 @@ async function main(): Promise<void> {
   // Nest camera bridge (Google SDM) — supplies the params go2rtc's `nest:`
   // source lines need; re-renders go2rtc.yaml on connect/disconnect.
   const nest = new NestBridge({ store, log: log.child("nest") });
+  nest.startProbe();
 
   const go2rtc = new Go2rtcSupervisor(store, log.child("go2rtc"), undefined, () =>
     nest.getStreamParams(),
@@ -37,6 +52,8 @@ async function main(): Promise<void> {
 
   // Recorder and motion detector reconcile themselves on config changes.
   const recorder = new Recorder(db, store, log.child("recorder"));
+  // Disk-full writes free the oldest recordings instead of failing repeatedly.
+  db.setDiskFullHandler(() => recorder.emergencyPrune());
   recorder.sync();
   const motion = new MotionDetector(store, log.child("motion"));
   motion.sync();
@@ -91,9 +108,11 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         pipeline.stop();
-        motion.stopAll();
-        recorder.stopAll();
+        nest.stopProbe();
         go2rtc.stop();
+        // Wait for every capture/decoder child to actually exit (3s cap each)
+        // so ffmpeg processes are not orphaned mid-segment.
+        await Promise.allSettled([motion.stopAll(), recorder.stopAll()]);
         await Promise.allSettled([api.close(), link.stop(), detect.close(), gdrive.stop()]);
         db.close();
         log.info("shutdown complete");

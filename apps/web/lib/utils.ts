@@ -19,6 +19,21 @@ export function toPlan(plan: string): "free" | "plus" | "pro" {
   return plan === "plus" || plan === "pro" ? plan : "free";
 }
 
+/* Notification channel prefs, mirrored by the notify edge function.
+ * A type alias (not an interface) so it stays assignable to the Json column
+ * type via the implicit index signature. */
+export type ChannelPrefs = { push: boolean; email: boolean; sms: boolean };
+
+/** channels jsonb -> booleans; missing keys are off, except push (default on). */
+export function parseChannels(value: unknown): ChannelPrefs {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    push: raw.push !== false,
+    email: raw.email === true,
+    sms: raw.sms === true,
+  };
+}
+
 /** A node is online when it says so *and* has phoned home in the last 2 minutes. */
 export const NODE_STALE_MS = 2 * 60 * 1000;
 

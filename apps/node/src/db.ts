@@ -46,12 +46,35 @@ export interface EventRow {
  */
 export class NodeDb {
   readonly db: Database.Database;
+  private onDiskFull: (() => void) | null = null;
 
   constructor(dbDir: string = process.env.DB_DIR ?? "/db") {
     mkdirSync(dbDir, { recursive: true });
     this.db = new Database(path.join(dbDir, "nightjar.db"));
     this.db.pragma("journal_mode = WAL");
     this.migrate();
+  }
+
+  /** Called when a write fails with SQLITE_FULL — wired to the recorder's emergency prune. */
+  setDiskFullHandler(handler: () => void): void {
+    this.onDiskFull = handler;
+  }
+
+  /**
+   * Run a write; on SQLITE_FULL trigger the emergency prune (frees recording
+   * segments) and retry once, so a full disk degrades instead of throwing on
+   * every poll.
+   */
+  private write<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      if ((err as { code?: string }).code === "SQLITE_FULL" && this.onDiskFull) {
+        this.onDiskFull();
+        return fn();
+      }
+      throw err;
+    }
   }
 
   private migrate(): void {
@@ -117,18 +140,30 @@ export class NodeDb {
   }
 
   insertSegment(cameraId: string, filePath: string, startedAtMs: number): number {
-    const result = this.db
-      .prepare("INSERT INTO segments (camera_id, path, started_at) VALUES (?, ?, ?)")
-      .run(cameraId, filePath, startedAtMs);
+    const result = this.write(() =>
+      this.db
+        .prepare("INSERT INTO segments (camera_id, path, started_at) VALUES (?, ?, ?)")
+        .run(cameraId, filePath, startedAtMs),
+    );
     return Number(result.lastInsertRowid);
   }
 
   endSegment(id: number, endedAtMs: number): void {
-    this.db.prepare("UPDATE segments SET ended_at = ? WHERE id = ?").run(endedAtMs, id);
+    this.write(() => this.db.prepare("UPDATE segments SET ended_at = ? WHERE id = ?").run(endedAtMs, id));
   }
 
   deleteSegment(id: number): void {
-    this.db.prepare("DELETE FROM segments WHERE id = ?").run(id);
+    this.write(() => this.db.prepare("DELETE FROM segments WHERE id = ?").run(id));
+  }
+
+  /** Newest indexed segment instant (ended_at, or started_at while open) for one camera. */
+  latestSegmentAt(cameraId: string): number | null {
+    const row = this.db
+      .prepare(
+        "SELECT MAX(COALESCE(ended_at, started_at)) AS at FROM segments WHERE camera_id = ?",
+      )
+      .get(cameraId) as { at: number | null };
+    return row.at;
   }
 
   /** Rows still marked in-progress (ended_at NULL) for one camera — dangling after a crash. */
@@ -330,6 +365,35 @@ export class NodeDb {
          FROM events ORDER BY started_at DESC LIMIT ?`,
       )
       .all(limit) as EventRow[];
+  }
+
+  /**
+   * Drop local event rows and dead upload/gdrive queue leftovers older than
+   * cutoffMs. Returns the dropped queue rows so the caller can release any
+   * clip dirs they still referenced.
+   */
+  pruneOldRows(cutoffMs: number): {
+    events: number;
+    uploads: UploadQueueRow[];
+    gdrive: GdriveQueueRow[];
+  } {
+    const cutoffIso = new Date(cutoffMs).toISOString();
+    const uploads = this.db
+      .prepare(
+        "SELECT id, event_id, file, attempts, created_at FROM upload_queue WHERE created_at < ?",
+      )
+      .all(cutoffMs) as UploadQueueRow[];
+    for (const row of uploads) this.deleteUpload(row.id);
+    const gdrive = this.db
+      .prepare(
+        "SELECT id, event_id, file, attempts, created_at FROM gdrive_queue WHERE created_at < ?",
+      )
+      .all(cutoffMs) as GdriveQueueRow[];
+    for (const row of gdrive) this.deleteGdrive(row.id);
+    const events = this.write(
+      () => this.db.prepare("DELETE FROM events WHERE started_at < ?").run(cutoffIso).changes,
+    );
+    return { events, uploads, gdrive };
   }
 
   updateEventClipStatus(eventId: string, clipStatus: string, thumbnailPath?: string): void {

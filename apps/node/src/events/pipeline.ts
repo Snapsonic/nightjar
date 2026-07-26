@@ -368,53 +368,66 @@ export class EventPipeline {
 
   private async runUploader(): Promise<void> {
     while (this.running) {
-      const job = this.deps.db.nextUpload();
-      if (!job) {
-        await this.sleep(UPLOAD_IDLE_MS);
-        continue;
-      }
-      if (!this.deps.link.getClient()) {
-        // Cloud unlinked/offline — leave the job queued and check again later.
-        await this.sleep(UPLOAD_IDLE_MS);
-        continue;
-      }
+      // The whole iteration (nextUpload included) is guarded: an unexpected
+      // throw must never end this loop while the pipeline is running.
       try {
-        await this.uploadEvent(job.event_id, job.file);
+        await this.uploaderIteration();
+      } catch (err) {
+        this.deps.log.error(
+          `uploader iteration failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await this.sleep(UPLOAD_IDLE_MS);
+      }
+    }
+  }
+
+  private async uploaderIteration(): Promise<void> {
+    const job = this.deps.db.nextUpload();
+    if (!job) {
+      await this.sleep(UPLOAD_IDLE_MS);
+      return;
+    }
+    if (!this.deps.link.getClient()) {
+      // Cloud unlinked/offline — leave the job queued and check again later.
+      await this.sleep(UPLOAD_IDLE_MS);
+      return;
+    }
+    try {
+      await this.uploadEvent(job.event_id, job.file);
+      this.deps.db.deleteUpload(job.id);
+      // The clip dir is shared with the Google Drive backup queue — delete
+      // it only once neither queue references the event.
+      if (!this.deps.db.clipReferenced(job.event_id)) {
+        rmSync(job.file, { recursive: true, force: true });
+      }
+      this.deps.log.info(`event ${job.event_id} uploaded`);
+    } catch (err) {
+      this.deps.db.bumpUploadAttempts(job.id);
+      // Dead-letter poisoned jobs: the queue is serial, so one job that can
+      // never succeed blocks every event behind it forever. Missing clip
+      // files are unrecoverable — abandon immediately instead of retrying.
+      const unrecoverable = (err as NodeJS.ErrnoException).code === "ENOENT";
+      if (unrecoverable || job.attempts + 1 >= UPLOAD_MAX_ATTEMPTS) {
+        this.deps.log.error(
+          `upload of event ${job.event_id} abandoned after ${job.attempts + 1} attempts: ` +
+            `${err instanceof Error ? err.message : String(err)} — clip stays local`,
+        );
+        this.deps.db.updateEventClipStatus(job.event_id, "local");
         this.deps.db.deleteUpload(job.id);
-        // The clip dir is shared with the Google Drive backup queue — delete
-        // it only once neither queue references the event.
         if (!this.deps.db.clipReferenced(job.event_id)) {
           rmSync(job.file, { recursive: true, force: true });
         }
-        this.deps.log.info(`event ${job.event_id} uploaded`);
-      } catch (err) {
-        this.deps.db.bumpUploadAttempts(job.id);
-        // Dead-letter poisoned jobs: the queue is serial, so one job that can
-        // never succeed blocks every event behind it forever. Missing clip
-        // files are unrecoverable — abandon immediately instead of retrying.
-        const unrecoverable = (err as NodeJS.ErrnoException).code === "ENOENT";
-        if (unrecoverable || job.attempts + 1 >= UPLOAD_MAX_ATTEMPTS) {
-          this.deps.log.error(
-            `upload of event ${job.event_id} abandoned after ${job.attempts + 1} attempts: ` +
-              `${err instanceof Error ? err.message : String(err)} — clip stays local`,
-          );
-          this.deps.db.updateEventClipStatus(job.event_id, "local");
-          this.deps.db.deleteUpload(job.id);
-          if (!this.deps.db.clipReferenced(job.event_id)) {
-            rmSync(job.file, { recursive: true, force: true });
-          }
-          continue;
-        }
-        const backoff = Math.min(
-          UPLOAD_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
-          UPLOAD_BACKOFF_CAP_MS,
-        );
-        this.deps.log.warn(
-          `upload of event ${job.event_id} failed (attempt ${job.attempts + 1}): ` +
-            `${err instanceof Error ? err.message : String(err)} — retrying in ${Math.round(backoff / 1000)}s`,
-        );
-        await this.sleep(backoff);
+        return;
       }
+      const backoff = Math.min(
+        UPLOAD_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
+        UPLOAD_BACKOFF_CAP_MS,
+      );
+      this.deps.log.warn(
+        `upload of event ${job.event_id} failed (attempt ${job.attempts + 1}): ` +
+          `${err instanceof Error ? err.message : String(err)} — retrying in ${Math.round(backoff / 1000)}s`,
+      );
+      await this.sleep(backoff);
     }
   }
 

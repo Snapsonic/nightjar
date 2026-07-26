@@ -600,36 +600,49 @@ export class GdriveBackup {
 
   private async runUploader(): Promise<void> {
     while (this.running) {
-      const active = this.deps.store.get().backup.gdrive.enabled && this.token !== null;
-      const job = active ? this.deps.db.nextGdrive() : undefined;
-      if (!job) {
-        await this.sleep(BACKUP_IDLE_MS);
-        continue;
-      }
+      // The whole iteration (nextGdrive included) is guarded: an unexpected
+      // throw must never end this loop while the backup is running.
       try {
-        await this.backupEvent(job.event_id, job.file);
-        this.deps.db.deleteGdrive(job.id);
-        this.releaseClipDir(job.event_id, job.file);
-        this.log.info(`event ${job.event_id} backed up to Google Drive`);
+        await this.uploaderIteration();
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("HTTP 404")) {
-          // A cached folder id may point at a folder the user deleted in
-          // Drive — drop the cache so the retry re-resolves the chain.
-          this.folderCache.clear();
-          this.deps.db.clearGdriveFolders();
-        }
-        this.deps.db.bumpGdriveAttempts(job.id);
-        const backoff = Math.min(
-          BACKUP_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
-          BACKUP_BACKOFF_CAP_MS,
+        this.log.error(
+          `gdrive iteration failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
         );
-        this.log.warn(
-          `gdrive backup of event ${job.event_id} failed (attempt ${job.attempts + 1}): ` +
-            `${message} — retrying in ${Math.round(backoff / 1000)}s`,
-        );
-        await this.sleep(backoff);
+        await this.sleep(BACKUP_IDLE_MS);
       }
+    }
+  }
+
+  private async uploaderIteration(): Promise<void> {
+    const active = this.deps.store.get().backup.gdrive.enabled && this.token !== null;
+    const job = active ? this.deps.db.nextGdrive() : undefined;
+    if (!job) {
+      await this.sleep(BACKUP_IDLE_MS);
+      return;
+    }
+    try {
+      await this.backupEvent(job.event_id, job.file);
+      this.deps.db.deleteGdrive(job.id);
+      this.releaseClipDir(job.event_id, job.file);
+      this.log.info(`event ${job.event_id} backed up to Google Drive`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("HTTP 404")) {
+        // A cached folder id may point at a folder the user deleted in
+        // Drive — drop the cache so the retry re-resolves the chain.
+        this.folderCache.clear();
+        this.deps.db.clearGdriveFolders();
+      }
+      this.deps.db.bumpGdriveAttempts(job.id);
+      const backoff = Math.min(
+        BACKUP_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
+        BACKUP_BACKOFF_CAP_MS,
+      );
+      this.log.warn(
+        `gdrive backup of event ${job.event_id} failed (attempt ${job.attempts + 1}): ` +
+          `${message} — retrying in ${Math.round(backoff / 1000)}s`,
+      );
+      await this.sleep(backoff);
     }
   }
 

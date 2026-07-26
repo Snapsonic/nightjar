@@ -17,6 +17,11 @@ const EXPORT_TIMEOUT_MS = 60_000;
 /** Hover preview: wait this long before asking the node for a frame. */
 const PREVIEW_DEBOUNCE_MS = 250;
 const PREVIEW_BUCKET_MS = 60_000;
+/** Preview signed URLs live 600s — treat cached ones as fresh for 80% of that. */
+const PREVIEW_URL_FRESH_MS = 480_000;
+/** "No frame there" can be transient (channel hiccup) — retry after a while
+ *  instead of caching the miss forever. */
+const PREVIEW_NONE_RETRY_MS = 30_000;
 
 const dayParts = (day: string): [number, number, number] => {
   const [y = 0, m = 1, d = 1] = day.split("-").map(Number);
@@ -63,7 +68,7 @@ export function TimelineHistory({
   nodeId: string;
   autoFocus?: boolean;
 }) {
-  const channelRef = useRef<NodeChannel | null>(null);
+  const channelPromiseRef = useRef<Promise<NodeChannel> | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const sectionRef = useRef<HTMLElement>(null);
 
@@ -80,18 +85,25 @@ export function TimelineHistory({
   /** Hover position over the bar (fraction of the day + instant). */
   const [hover, setHover] = useState<{ frac: number; ms: number; covered: boolean } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
-  /** bucketMs -> signed URL, or null when the node has no frame there. */
-  const previewCacheRef = useRef(new Map<number, string | null>());
+  /** bucketMs -> signed URL (null: no frame there) + freshness deadline. */
+  const previewCacheRef = useRef(new Map<number, { url: string | null; expiresAt: number }>());
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Monotonic token so only the latest in-flight preview request wins. */
   const previewSeqRef = useRef(0);
 
-  /** Connect once (lazily) and reuse for all timeline requests. */
-  const getChannel = useCallback(async (): Promise<NodeChannel> => {
-    if (channelRef.current) return channelRef.current;
-    const channel = await NodeChannel.connect(getBrowserClient(), nodeId);
-    channelRef.current = channel;
-    return channel;
+  /** Connect once (lazily) and reuse for all timeline requests. Single-flight:
+   *  the in-flight promise is cached so concurrent callers can't each open a
+   *  connection (which would leak references on the shared channel). */
+  const getChannel = useCallback((): Promise<NodeChannel> => {
+    if (!channelPromiseRef.current) {
+      const promise = NodeChannel.connect(getBrowserClient(), nodeId).catch((err: unknown) => {
+        // Failed connects must not stick: only clear if we're still current.
+        if (channelPromiseRef.current === promise) channelPromiseRef.current = null;
+        throw err;
+      });
+      channelPromiseRef.current = promise;
+    }
+    return channelPromiseRef.current;
   }, [nodeId]);
 
   useEffect(() => {
@@ -120,8 +132,12 @@ export function TimelineHistory({
       cancelled = true;
       if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
       previewSeqRef.current += 1; // orphan any in-flight preview
-      channelRef.current?.close();
-      channelRef.current = null;
+      previewCacheRef.current.clear();
+      // Release the shared channel even when unmounting mid-connect: wait for
+      // the in-flight handle and close it as soon as it exists.
+      const promise = channelPromiseRef.current;
+      channelPromiseRef.current = null;
+      void promise?.then((channel) => channel.close()).catch(() => undefined);
     };
   }, [cameraId, getChannel]);
 
@@ -157,9 +173,11 @@ export function TimelineHistory({
   const requestPreview = useCallback(
     (bucket: number) => {
       const cached = previewCacheRef.current.get(bucket);
-      if (cached !== undefined) {
+      if (cached && Date.now() < cached.expiresAt) {
         setPreview(
-          cached === null ? { status: "none", bucket } : { status: "ready", bucket, url: cached },
+          cached.url === null
+            ? { status: "none", bucket }
+            : { status: "ready", bucket, url: cached.url },
         );
         return;
       }
@@ -169,11 +187,18 @@ export function TimelineHistory({
         try {
           const channel = await getChannel();
           const url = await channel.requestTimelinePreview(cameraId, bucket);
-          previewCacheRef.current.set(bucket, url);
+          previewCacheRef.current.set(bucket, {
+            url,
+            expiresAt: Date.now() + PREVIEW_URL_FRESH_MS,
+          });
           if (previewSeqRef.current === seq) setPreview({ status: "ready", bucket, url });
         } catch {
-          // "no recording there" and transient failures both render as none.
-          previewCacheRef.current.set(bucket, null);
+          // "no recording there" and transient failures both render as none,
+          // but only for a short while — never permanently.
+          previewCacheRef.current.set(bucket, {
+            url: null,
+            expiresAt: Date.now() + PREVIEW_NONE_RETRY_MS,
+          });
           if (previewSeqRef.current === seq) setPreview({ status: "none", bucket });
         }
       })();
@@ -200,8 +225,9 @@ export function TimelineHistory({
       return;
     }
     const bucket = Math.floor(ms / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
-    if (previewCacheRef.current.has(bucket)) {
-      requestPreview(bucket); // cache hit — show instantly, no debounce
+    const cached = previewCacheRef.current.get(bucket);
+    if (cached && Date.now() < cached.expiresAt) {
+      requestPreview(bucket); // fresh cache hit — show instantly, no debounce
       return;
     }
     setPreview((prev) => (prev?.bucket === bucket ? prev : { status: "loading", bucket }));

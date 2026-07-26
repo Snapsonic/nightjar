@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { EventKind, Zone } from "@nightjar/shared";
 import type { Database } from "@nightjar/db";
@@ -54,6 +54,9 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [selected, setSelected] = useState<EventRow | null>(null);
+  /** Thumbnail paths already re-signed once after an <img> error — the signed
+   *  URLs last an hour, so a long-lived tab can watch them expire. */
+  const resignedRef = useRef(new Set<string>());
 
   const cameraNames = new Map(cameras.map((c) => [c.id, c.name]));
   const cameraZoneNames = new Map<string, Map<string, string>>();
@@ -82,6 +85,20 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
       if (!item.error && item.path && item.signedUrl) next[item.path] = item.signedUrl;
     }
     setThumbs((prev) => ({ ...prev, ...next }));
+  }, []);
+
+  /** An expired/broken thumbnail URL fires <img onError> — re-sign that one
+   *  path a single time (guarded so a genuinely missing object can't loop). */
+  const refreshThumb = useCallback(async (path: string) => {
+    if (resignedRef.current.has(path)) return;
+    resignedRef.current.add(path);
+    const supabase = getBrowserClient();
+    const { data, error: signError } = await supabase.storage
+      .from("event-clips")
+      .createSignedUrl(path, SIGNED_URL_TTL_SEC);
+    if (signError || !data?.signedUrl) return; // thumbnails are decorative — fail quietly
+    const url = data.signedUrl;
+    setThumbs((prev) => ({ ...prev, [path]: url }));
   }, []);
 
   const load = useCallback(
@@ -197,10 +214,11 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
         ) : (
           <ul className="space-y-2">
             {events.map((event) => {
-              const thumbUrl =
+              const thumbPath =
                 event.clip_status === "uploaded" && event.thumbnail_path
-                  ? thumbs[event.thumbnail_path]
-                  : undefined;
+                  ? event.thumbnail_path
+                  : null;
+              const thumbUrl = thumbPath ? thumbs[thumbPath] : undefined;
               const zoneNames = eventZoneNames(
                 event.metadata,
                 cameraZoneNames.get(event.camera_id),
@@ -244,6 +262,9 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
                         <img
                           src={thumbUrl}
                           alt=""
+                          onError={() => {
+                            if (thumbPath) void refreshThumb(thumbPath);
+                          }}
                           className="h-full w-full object-cover"
                           loading="lazy"
                         />

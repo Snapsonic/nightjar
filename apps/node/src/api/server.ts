@@ -21,7 +21,7 @@ import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
 import type { NestBridge } from "../nest/sdm.js";
-import type { Recorder } from "../recorder/recorder.js";
+import { isCaptureLive, type Recorder } from "../recorder/recorder.js";
 import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
 import { getPreviewFrame } from "../recorder/preview.js";
 
@@ -78,11 +78,21 @@ export interface ApiDeps {
   log: Logger;
 }
 
-function toPublic(camera: CameraConfig, streams: Record<string, unknown> | null) {
+function toPublic(
+  camera: CameraConfig,
+  streams: Record<string, unknown> | null,
+  recorder: Recorder,
+) {
+  // Recording cameras report real capture liveness (segments actually landing
+  // in the index); others keep the go2rtc-config heuristic.
+  const online =
+    camera.enabled && camera.record
+      ? isCaptureLive(recorder.lastSegmentAt(camera.id), Date.now())
+      : streams !== null && go2rtcStreamName(camera.id) in streams;
   return {
     ...CameraPublic.parse(camera),
     hasSubstream: camera.rtspSubUrl !== undefined,
-    online: streams !== null && go2rtcStreamName(camera.id) in streams,
+    online,
   };
 }
 
@@ -108,7 +118,7 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       version: deps.version,
       cloud: deps.link.getState(),
       go2rtcHealthy: streams !== null,
-      cameras: config.cameras.map((camera) => toPublic(camera, streams)),
+      cameras: config.cameras.map((camera) => toPublic(camera, streams, deps.recorder)),
     };
   });
 
@@ -127,7 +137,7 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
 
   app.get("/api/cameras", async () => {
     const streams = await deps.go2rtc.streams();
-    return deps.cameras.list().map((camera) => toPublic(camera, streams));
+    return deps.cameras.list().map((camera) => toPublic(camera, streams, deps.recorder));
   });
 
   app.post("/api/cameras", async (req, reply) => {
@@ -148,10 +158,10 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
       const capabilities = await deps.nest.deviceCapabilities(input.nestDeviceId as string);
       const nestProtocols = await deps.nest.deviceProtocols(input.nestDeviceId as string);
       const camera = await deps.cameras.addCamera({ ...input, capabilities, nestProtocols });
-      return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams()));
+      return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams(), deps.recorder));
     }
     const camera = await deps.cameras.addCamera(input);
-    return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams()));
+    return reply.code(201).send(toPublic(camera, await deps.go2rtc.streams(), deps.recorder));
   });
 
   app.delete<{ Params: { id: string } }>("/api/cameras/:id", async (req, reply) => {
@@ -175,7 +185,7 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
     }
     const updated = deps.cameras.updateCamera(req.params.id, { zones: parsed.data.zones });
     if (!updated) return reply.code(404).send({ error: "camera not found" });
-    return toPublic(updated, await deps.go2rtc.streams());
+    return toPublic(updated, await deps.go2rtc.streams(), deps.recorder);
   });
 
   app.post<{ Params: { id: string } }>("/api/cameras/:id/probe", async (req, reply) => {

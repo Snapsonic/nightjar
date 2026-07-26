@@ -25,7 +25,12 @@ import type { BrowserClient } from "@/lib/supabase/client";
  * Incoming payloads are validated with `RealtimeMessage.safeParse`.
  */
 
-export type NodeChannelErrorCode = "timeout" | "channel" | "node_error" | "closed";
+export type NodeChannelErrorCode =
+  | "timeout"
+  | "channel"
+  | "node_error"
+  | "closed"
+  | "channel_lost";
 
 export class NodeChannelError extends Error {
   constructor(
@@ -72,90 +77,177 @@ interface Pending {
 }
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+/** Cap on joining the realtime channel so a wedged socket can't hang forever. */
+export const JOIN_TIMEOUT_MS = 15_000;
 
 /**
- * One NodeChannel per node, shared across components: supabase-js returns the
- * SAME underlying realtime channel for a duplicate topic, and subscribing an
- * already-joined channel never fires its status callback — so a second
- * independent NodeChannel on one page would hang forever. connect() refcounts;
- * close() only tears down when the last user releases it.
+ * One shared core per node, shared across components: supabase-js returns the
+ * SAME underlying realtime channel object for a duplicate topic, and
+ * subscribing an already-joined (or errored) channel never fires its status
+ * callback — so two independent subscriptions to one topic on a page would
+ * hang forever. The core refcounts its holders and only tears the channel
+ * down when the last one releases it.
+ *
+ * `NodeChannel.connect()` hands each caller its own lightweight handle whose
+ * `close()` is idempotent PER HANDLE, so a component double-closing its handle
+ * can never double-decrement the shared refcount under other components.
  */
-interface SharedEntry {
-  promise: Promise<NodeChannel>;
-  refs: number;
-}
-const sharedChannels = new Map<string, SharedEntry>();
+const sharedCores = new Map<string, SharedCore>();
 
-export class NodeChannel {
+class SharedCore {
+  refs = 0;
+  private channel: RealtimeChannel | null = null;
+  /** Single-flight join/rejoin — concurrent callers await the same attempt. */
+  private joinPromise: Promise<void> | null = null;
+  /** In-flight removeChannel of a dead channel object; joins wait for it so a
+   *  stale object can't be handed back by `supabase.channel()`. */
+  private removing: Promise<unknown> | null = null;
+  private destroyed = false;
   private readonly pending = new Map<string, Pending>();
-  private closed = false;
 
-  private constructor(
+  constructor(
+    private readonly supabase: BrowserClient,
     readonly nodeId: string,
-    private readonly channel: RealtimeChannel,
   ) {}
 
-  /**
-   * Authorizes Realtime with the current session token (required for private
-   * channels), subscribes to `node:{nodeId}` and resolves once joined.
-   */
-  static async connect(supabase: BrowserClient, nodeId: string): Promise<NodeChannel> {
-    const existing = sharedChannels.get(nodeId);
-    if (existing) {
-      existing.refs += 1;
-      return existing.promise;
+  /** Resolves once the underlying channel is joined. Safe to call repeatedly;
+   *  after a post-join loss this transparently builds a fresh channel. */
+  ensureJoined(): Promise<void> {
+    if (this.destroyed) {
+      return Promise.reject(new NodeChannelError("Channel is closed.", "closed"));
     }
-    const entry: SharedEntry = { refs: 1, promise: NodeChannel.open(supabase, nodeId) };
-    sharedChannels.set(nodeId, entry);
-    try {
-      return await entry.promise;
-    } catch (err) {
-      sharedChannels.delete(nodeId);
-      throw err;
-    }
+    if (this.channel !== null && this.channel.state === "joined") return Promise.resolve();
+    this.joinPromise ??= this.join().finally(() => {
+      this.joinPromise = null;
+    });
+    return this.joinPromise;
   }
 
-  private static async open(supabase: BrowserClient, nodeId: string): Promise<NodeChannel> {
-    const { data } = await supabase.auth.getSession();
+  private throwIfDestroyed(): void {
+    if (this.destroyed) throw new NodeChannelError("Channel is closed.", "closed");
+  }
+
+  private makeChannel(): RealtimeChannel {
+    return this.supabase.channel(nodeTopic(this.nodeId), {
+      config: { private: true, broadcast: { self: false, ack: false } },
+    });
+  }
+
+  private async join(): Promise<void> {
+    // Wait out any in-flight teardown first: until removeChannel completes,
+    // supabase.channel() below would return the dying channel object again.
+    if (this.removing) {
+      await this.removing;
+      this.removing = null;
+    }
+    this.throwIfDestroyed();
+
+    const { data } = await this.supabase.auth.getSession();
     const token = data.session?.access_token;
     if (!token) throw new NodeChannelError("You are signed out.", "channel");
 
     // Private channels require an authorized realtime connection.
-    await supabase.realtime.setAuth(token);
+    await this.supabase.realtime.setAuth(token);
+    this.throwIfDestroyed();
 
-    const channel = supabase.channel(nodeTopic(nodeId), {
-      config: { private: true, broadcast: { self: false, ack: false } },
-    });
+    // A failed earlier join leaves its errored channel registered in the
+    // client, and supabase.channel() keeps returning that same object — on
+    // which subscribe() is a silent no-op. Force a genuinely fresh channel.
+    let channel = this.makeChannel();
+    for (let attempt = 0; attempt < 2 && channel.state !== "closed"; attempt++) {
+      await this.supabase.removeChannel(channel).catch(() => undefined);
+      channel = this.makeChannel();
+    }
+    if (channel.state !== "closed") {
+      throw new NodeChannelError("Could not create a fresh node channel.", "channel");
+    }
 
-    const nodeChannel = new NodeChannel(nodeId, channel);
     channel.on("broadcast", { event: REALTIME_BROADCAST_EVENT }, ({ payload }) => {
-      nodeChannel.handleIncoming(payload);
+      this.handleIncoming(payload);
     });
+    this.channel = channel;
 
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      channel.subscribe((status, err) => {
-        if (settled) return;
-        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
-          settled = true;
-          resolve();
-        } else if (
-          status === REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR ||
-          status === REALTIME_SUBSCRIBE_STATES.TIMED_OUT ||
-          status === REALTIME_SUBSCRIBE_STATES.CLOSED
-        ) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
           settled = true;
           reject(
             new NodeChannelError(
-              err?.message ?? `Could not join the node channel (${status.toLowerCase()}).`,
+              `Joining the node channel timed out after ${Math.round(JOIN_TIMEOUT_MS / 1000)}s.`,
               "channel",
             ),
           );
-        }
+        }, JOIN_TIMEOUT_MS);
+        channel.subscribe((status, err) => {
+          if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            }
+            return;
+          }
+          if (
+            status === REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR ||
+            status === REALTIME_SUBSCRIBE_STATES.TIMED_OUT ||
+            status === REALTIME_SUBSCRIBE_STATES.CLOSED
+          ) {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              reject(
+                new NodeChannelError(
+                  err?.message ?? `Could not join the node channel (${status.toLowerCase()}).`,
+                  "channel",
+                ),
+              );
+            } else {
+              // The same subscribe callback keeps firing for post-join
+              // transitions — this is the persistent connection-loss monitor.
+              this.handleChannelLost(channel, status);
+            }
+          }
+        });
       });
-    });
+      // Released by every holder while the join was in flight — since the
+      // destroy path already saw `this.channel`, it initiated removal; just
+      // surface the closure to the caller.
+      this.throwIfDestroyed();
+    } catch (err) {
+      if (this.channel === channel) {
+        this.channel = null;
+        // Leave nothing behind: an errored channel would otherwise linger in
+        // the client and poison the next connect attempt for this topic.
+        await this.supabase.removeChannel(channel).catch(() => undefined);
+      }
+      throw err;
+    }
+  }
 
-    return nodeChannel;
+  /** Post-join CLOSED / CHANNEL_ERROR / TIMED_OUT: fail fast and reset so the
+   *  next request (or connect) transparently builds a fresh channel. Without
+   *  this, send() on a dead channel silently falls back to HTTP broadcast and
+   *  "succeeds" while replies never arrive. */
+  private handleChannelLost(channel: RealtimeChannel, status: string): void {
+    if (this.destroyed || this.channel !== channel) return; // stale or intentional teardown
+    this.channel = null;
+    this.removing = this.supabase.removeChannel(channel).catch(() => undefined);
+    this.rejectAll(
+      new NodeChannelError(
+        `Lost the connection to the node (${status.toLowerCase()}).`,
+        "channel_lost",
+      ),
+    );
+  }
+
+  private rejectAll(err: NodeChannelError): void {
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    this.pending.clear();
   }
 
   private handleIncoming(payload: unknown): void {
@@ -193,16 +285,22 @@ export class NodeChannel {
     pending.resolve(message);
   }
 
-  /**
-   * Sends a request and resolves with the matching reply (same requestId, one
-   * of the expected types), or rejects on node error / timeout.
-   */
   async request<TType extends ReplyMessage["type"]>(
     message: OutgoingRequest,
     expect: readonly TType[],
-    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+    timeoutMs: number,
   ): Promise<Extract<ReplyMessage, { type: TType }>> {
-    if (this.closed) throw new NodeChannelError("Channel is closed.", "closed");
+    this.throwIfDestroyed();
+
+    // Self-heal: after a connection loss (or before the first join finishes)
+    // rejoin transparently instead of "sending" into a dead channel.
+    if (this.channel === null || this.channel.state !== "joined") {
+      await this.ensureJoined();
+    }
+    const channel = this.channel;
+    if (channel === null) {
+      throw new NodeChannelError("Lost the connection to the node.", "channel_lost");
+    }
 
     const requestId = crypto.randomUUID();
     const payload: RealtimeMessage = { ...message, requestId };
@@ -226,7 +324,7 @@ export class NodeChannel {
         timer,
       });
 
-      void this.channel
+      void channel
         .send({ type: "broadcast", event: REALTIME_BROADCAST_EVENT, payload })
         .then((status) => {
           if (status !== "ok") {
@@ -254,14 +352,75 @@ export class NodeChannel {
     });
   }
 
+  /** Drops one holder's reference; tears everything down when the last one goes. */
+  release(): void {
+    this.refs -= 1;
+    if (this.refs > 0) return;
+    if (sharedCores.get(this.nodeId) === this) sharedCores.delete(this.nodeId);
+    this.destroyed = true;
+    this.rejectAll(new NodeChannelError("Channel is closed.", "closed"));
+    const channel = this.channel;
+    this.channel = null;
+    if (channel) void this.supabase.removeChannel(channel).catch(() => undefined);
+  }
+}
+
+/**
+ * Per-caller handle around the shared per-node core. Components keep the same
+ * API as before — `NodeChannel.connect(...)`, the request helpers, `close()` —
+ * but each caller gets its own handle, so `close()` releases this caller's
+ * reference exactly once no matter how many times it runs.
+ */
+export class NodeChannel {
+  private released = false;
+
+  private constructor(private readonly core: SharedCore) {}
+
+  get nodeId(): string {
+    return this.core.nodeId;
+  }
+
+  /**
+   * Authorizes Realtime with the current session token (required for private
+   * channels), subscribes to `node:{nodeId}` (join capped at 15s) and resolves
+   * once joined. Concurrent callers share one core / one underlying channel.
+   */
+  static async connect(supabase: BrowserClient, nodeId: string): Promise<NodeChannel> {
+    let core = sharedCores.get(nodeId);
+    if (!core) {
+      core = new SharedCore(supabase, nodeId);
+      sharedCores.set(nodeId, core);
+    }
+    core.refs += 1;
+    const handle = new NodeChannel(core);
+    try {
+      await core.ensureJoined();
+      return handle;
+    } catch (err) {
+      handle.close(); // balance the refcount; evicts the core when last out
+      throw err;
+    }
+  }
+
+  /**
+   * Sends a request and resolves with the matching reply (same requestId, one
+   * of the expected types), or rejects on node error / timeout. If the
+   * underlying channel was lost since the last request, it rejoins first.
+   */
+  async request<TType extends ReplyMessage["type"]>(
+    message: OutgoingRequest,
+    expect: readonly TType[],
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<Extract<ReplyMessage, { type: TType }>> {
+    if (this.released) throw new NodeChannelError("Channel is closed.", "closed");
+    return this.core.request(message, expect, timeoutMs);
+  }
+
   /** Asks the node for a fresh camera snapshot; resolves to a signed image URL. */
   /** Cold camera streams (e.g. Nest via SDM after Google expires a stream
    *  URL) can take 15–25s to deliver a first frame, so snapshots wait longer
    *  than ordinary requests. */
-  async requestSnapshot(
-    cameraId: string,
-    timeoutMs: number = 30_000,
-  ): Promise<string> {
+  async requestSnapshot(cameraId: string, timeoutMs: number = 30_000): Promise<string> {
     const reply = await this.request(
       { type: "snapshot_request", cameraId },
       ["snapshot_reply"],
@@ -358,23 +517,11 @@ export class NodeChannel {
     );
   }
 
-  /** Unsubscribes and rejects any in-flight requests. Safe to call twice. */
-  /** Releases this user's reference; the underlying channel is only torn down
-   *  when the last component on the page lets go. */
+  /** Releases this handle's reference — idempotent per handle. The underlying
+   *  channel is only torn down when the last holder on the page lets go. */
   close(): void {
-    if (this.closed) return;
-    const entry = sharedChannels.get(this.nodeId);
-    if (entry) {
-      entry.refs -= 1;
-      if (entry.refs > 0) return;
-      sharedChannels.delete(this.nodeId);
-    }
-    this.closed = true;
-    for (const entry of this.pending.values()) {
-      clearTimeout(entry.timer);
-      entry.reject(new NodeChannelError("Channel is closed.", "closed"));
-    }
-    this.pending.clear();
-    void this.channel.unsubscribe();
+    if (this.released) return;
+    this.released = true;
+    this.core.release();
   }
 }

@@ -35,6 +35,9 @@ export function NodeCameras({
   const [snapshots, setSnapshots] = useState<Record<string, SnapshotState>>({});
   const [nonce, setNonce] = useState(0);
   const channelRef = useRef<NodeChannel | null>(null);
+  /** cameraId -> URL we already auto-refreshed once (signed URLs expire after
+   *  ~5 minutes; a broken <img> triggers one transparent re-request). */
+  const autoRefreshedRef = useRef(new Map<string, string>());
   const camerasRef = useRef(cameras);
   camerasRef.current = cameras;
 
@@ -113,6 +116,20 @@ export function NodeCameras({
       );
   };
 
+  /** The signed snapshot URL expired (or broke) — re-request once per URL so a
+   *  stale tab heals itself without looping on a persistently bad link. */
+  const handleImageError = (cameraId: string, url: string) => {
+    if (autoRefreshedRef.current.get(cameraId) === url) {
+      setSnapshots((prev) => ({
+        ...prev,
+        [cameraId]: { status: "error", message: "Snapshot link expired." },
+      }));
+      return;
+    }
+    autoRefreshedRef.current.set(cameraId, url);
+    retry(cameraId);
+  };
+
   if (cameras.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-night-600 px-4 py-6 text-center text-sm text-fog-500">
@@ -137,6 +154,7 @@ export function NodeCameras({
                 <img
                   src={snap.url}
                   alt={`Latest snapshot from ${camera.name}`}
+                  onError={() => handleImageError(camera.id, snap.url)}
                   className="absolute inset-0 h-full w-full object-cover"
                 />
               ) : (

@@ -58,6 +58,10 @@ export const NodeStatusReply = z.object({
       cameraId: z.string().uuid(),
       online: z.boolean(),
       recording: z.boolean(),
+      /** True when the recorder indexed a segment recently (capture liveness). */
+      capturing: z.boolean().optional(),
+      /** ISO time of the newest indexed recording segment, when any exists. */
+      lastSegmentAt: z.string().optional(),
     }),
   ),
   disk: z.object({ usedBytes: z.number(), totalBytes: z.number() }).optional(),

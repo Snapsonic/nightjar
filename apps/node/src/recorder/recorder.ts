@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readdirSync,
   rmdirSync,
+  rmSync,
   statSync,
   statfsSync,
   unlinkSync,
@@ -11,6 +12,7 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 import type { CameraConfig } from "@nightjar/shared";
+import { jitterMs, SPAWN_STAGGER_MS } from "../backoff.js";
 import { captureMainUrl } from "../cameras/streams.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb, SegmentRow } from "../db.js";
@@ -34,6 +36,27 @@ const BACKOFF_CAP_MS = 300_000;
 const STABLE_MS = 30_000;
 const PRUNE_INTERVAL_MS = 10 * 60_000;
 const KILL_GRACE_MS = 3_000;
+/** Local event rows / dead queue jobs older than this are pruned. */
+const EVENT_MAX_AGE_MS = 30 * 86_400_000;
+/** Watermark pruning never touches segments newer than this. */
+export const PRUNE_FLOOR_MS = 24 * 3_600_000;
+/** Throttle for repeated prune-time error/warn logs. */
+const PRUNE_LOG_THROTTLE_MS = 3_600_000;
+/** Emergency (disk-full) prunes are rate-limited to one per this interval. */
+const EMERGENCY_PRUNE_MIN_INTERVAL_MS = 30_000;
+/** ffmpeg input rw_timeout (microseconds): abort a wedged RTSP read after 30s. */
+const INPUT_RW_TIMEOUT_US = "30000000";
+
+/**
+ * Capture liveness threshold: a camera counts as capturing when its newest
+ * indexed segment instant is within 3x the segment duration of now.
+ */
+export const CAPTURE_LIVENESS_MS = 3 * SEGMENT_SECONDS * 1000;
+
+/** Pure liveness predicate — true when the newest segment is fresh enough. */
+export function isCaptureLive(lastSegmentAtMs: number | null, nowMs: number): boolean {
+  return lastSegmentAtMs !== null && nowMs - lastSegmentAtMs <= CAPTURE_LIVENESS_MS;
+}
 
 interface CameraRecording {
   camera: CameraConfig;
@@ -43,6 +66,8 @@ interface CameraRecording {
   restartTimer: NodeJS.Timeout | null;
   pollTimer: NodeJS.Timeout | null;
   spawnedAt: number;
+  /** Last time the wedge watchdog killed this capture (kill-once guard). */
+  lastWedgeKillMs: number;
   /** Paths already indexed in SQLite (dedupe across polls/restarts). */
   indexed: Set<string>;
   /** Open (still being written) segments: path -> segment row id. */
@@ -64,6 +89,9 @@ export class Recorder {
   private readonly unsubscribe: () => void;
   private pruneTimer: NodeJS.Timeout | null;
   private stopped = false;
+  private lastStatfsWarnMs = 0;
+  private lastFloorErrorMs = 0;
+  private lastEmergencyPruneMs = 0;
 
   constructor(
     private readonly db: NodeDb,
@@ -71,7 +99,13 @@ export class Recorder {
     private readonly log: Logger,
   ) {
     this.unsubscribe = this.store.onChange(() => this.sync());
-    this.pruneTimer = setInterval(() => this.prune(), PRUNE_INTERVAL_MS);
+    this.pruneTimer = setInterval(() => {
+      try {
+        this.prune();
+      } catch (err) {
+        this.log.warn(`retention prune failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, PRUNE_INTERVAL_MS);
     this.pruneTimer.unref();
   }
 
@@ -98,12 +132,16 @@ export class Recorder {
         rec.camera = camera;
       }
     }
+    let index = 0;
     for (const camera of wanted.values()) {
-      if (!this.recordings.has(camera.id)) this.start(camera);
+      // Stagger fresh spawns by camera index so a node (re)start doesn't herd
+      // every capture onto the upstream at once.
+      if (!this.recordings.has(camera.id)) this.start(camera, index * SPAWN_STAGGER_MS);
+      index++;
     }
   }
 
-  start(camera: CameraConfig): void {
+  start(camera: CameraConfig, delayMs = 0): void {
     if (this.stopped || this.recordings.has(camera.id)) return;
     const rec: CameraRecording = {
       camera,
@@ -113,16 +151,37 @@ export class Recorder {
       restartTimer: null,
       pollTimer: null,
       spawnedAt: 0,
+      lastWedgeKillMs: 0,
       indexed: new Set(this.db.segmentPaths(camera.id)),
       open: new Map(),
       stderrTail: "",
     };
     this.recordings.set(camera.id, rec);
     this.reconcileDangling(camera.id);
-    this.spawn(rec);
-    rec.pollTimer = setInterval(() => this.pollSegments(rec), POLL_MS);
+    if (delayMs > 0) {
+      rec.restartTimer = setTimeout(() => {
+        rec.restartTimer = null;
+        this.spawn(rec);
+      }, delayMs);
+      rec.restartTimer.unref();
+    } else {
+      this.spawn(rec);
+    }
+    rec.pollTimer = setInterval(() => {
+      try {
+        this.pollSegments(rec);
+        this.checkWedged(rec);
+      } catch (err) {
+        this.log.warn(
+          `segment poll for camera ${camera.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, POLL_MS);
     rec.pollTimer.unref();
-    this.log.info(`recording started for camera ${camera.id} ("${camera.name}")`);
+    this.log.info(
+      `recording started for camera ${camera.id} ("${camera.name}")` +
+        (delayMs > 0 ? ` — first spawn in ${Math.round(delayMs / 1000)}s` : ""),
+    );
   }
 
   stop(cameraId: string): void {
@@ -137,18 +196,28 @@ export class Recorder {
     this.log.info(`recording stopped for camera ${cameraId}`);
   }
 
-  stopAll(): void {
+  /** Stop everything; resolves once every child has exited (or the kill-grace cap). */
+  async stopAll(): Promise<void> {
     this.stopped = true;
     this.unsubscribe();
     if (this.pruneTimer) {
       clearInterval(this.pruneTimer);
       this.pruneTimer = null;
     }
+    const procs = [...this.recordings.values()]
+      .map((rec) => rec.proc)
+      .filter((proc): proc is ChildProcess => proc !== null);
     for (const cameraId of [...this.recordings.keys()]) this.stop(cameraId);
+    await Promise.all(procs.map((proc) => waitForExit(proc, KILL_GRACE_MS)));
   }
 
   isRecording(cameraId: string): boolean {
     return this.recordings.get(cameraId)?.proc != null;
+  }
+
+  /** Newest indexed segment instant for a camera (unix ms), from the SQLite index. */
+  lastSegmentAt(cameraId: string): number | null {
+    return this.db.latestSegmentAt(cameraId);
   }
 
   /* ---------- capture ---------- */
@@ -173,6 +242,9 @@ export class Recorder {
       "-nostdin",
       "-loglevel", "error",
       "-rtsp_transport", "tcp",
+      // Abort (and let the restart path recover) when the input socket
+      // stalls — a half-open TCP connection otherwise wedges ffmpeg forever.
+      "-rw_timeout", INPUT_RW_TIMEOUT_US,
       "-i", this.captureUrl(rec.camera),
       "-c", "copy",
       "-map", "0",
@@ -201,22 +273,50 @@ export class Recorder {
     proc.on("exit", (code, signal) => {
       if (rec.proc !== proc) return;
       rec.proc = null;
-      this.pollSegments(rec); // index anything the dying process flushed
-      this.closeOpenSegments(rec, Date.now());
+      try {
+        this.pollSegments(rec); // index anything the dying process flushed
+        this.closeOpenSegments(rec, Date.now());
+      } catch (err) {
+        this.log.warn(
+          `segment sweep after ffmpeg exit for camera ${rec.camera.id} failed: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       if (rec.stopping || this.stopped) return;
       if (Date.now() - rec.spawnedAt > STABLE_MS) rec.backoffMs = BACKOFF_START_MS;
+      const delayMs = jitterMs(rec.backoffMs);
       const tail = rec.stderrTail.trim().split("\n").pop() ?? "";
       this.log.warn(
         `ffmpeg for camera ${rec.camera.id} exited (code=${code} signal=${signal})` +
-          `${tail ? ` — ${tail}` : ""} — restarting in ${Math.round(rec.backoffMs / 1000)}s`,
+          `${tail ? ` — ${tail}` : ""} — restarting in ${Math.round(delayMs / 1000)}s`,
       );
       rec.restartTimer = setTimeout(() => {
         rec.restartTimer = null;
         this.spawn(rec);
-      }, rec.backoffMs);
+      }, delayMs);
       rec.restartTimer.unref();
       rec.backoffMs = Math.min(rec.backoffMs * 2, BACKOFF_CAP_MS);
     });
+  }
+
+  /**
+   * Wedge watchdog (runs on the poll interval): a live ffmpeg that has not
+   * produced a segment for 3x the segment duration is stuck (e.g. frozen
+   * upstream that still holds the TCP session) — kill it and let the normal
+   * restart-with-backoff path take over.
+   */
+  private checkWedged(rec: CameraRecording): void {
+    if (rec.proc === null || rec.stopping) return;
+    const now = Date.now();
+    if (now - rec.lastWedgeKillMs < CAPTURE_LIVENESS_MS) return; // kill in flight / just retried
+    const newestMs = Math.max(this.lastSegmentAt(rec.camera.id) ?? 0, rec.spawnedAt);
+    if (now - newestMs <= CAPTURE_LIVENESS_MS) return;
+    rec.lastWedgeKillMs = now;
+    this.log.warn(
+      `capture for camera ${rec.camera.id} looks wedged — no new segments for ` +
+        `${Math.round((now - newestMs) / 1000)}s, killing ffmpeg`,
+    );
+    this.killProcess(rec);
   }
 
   private killProcess(rec: CameraRecording): void {
@@ -343,7 +443,11 @@ export class Recorder {
   /** Delete expired segments, then oldest-first while over the disk watermark. */
   prune(): void {
     const retention = this.store.get().retention;
-    const cutoffMs = Date.now() - retention.maxDays * 86_400_000;
+    const now = Date.now();
+    // Absolute floor: nothing newer than 24h is ever pruned, even when the
+    // watermark cannot be satisfied.
+    const floorMs = now - PRUNE_FLOOR_MS;
+    const cutoffMs = Math.min(now - retention.maxDays * 86_400_000, floorMs);
     let removed = 0;
     for (const row of this.db.segmentsStartedBefore(cutoffMs, 5_000)) {
       this.deleteSegmentRow(row);
@@ -355,16 +459,69 @@ export class Recorder {
       try {
         const stats = statfsSync(recordingsDir);
         usedFraction = stats.blocks > 0 ? (stats.blocks - stats.bavail) / stats.blocks : 0;
-      } catch {
+      } catch (err) {
+        if (now - this.lastStatfsWarnMs >= PRUNE_LOG_THROTTLE_MS) {
+          this.lastStatfsWarnMs = now;
+          this.log.warn(
+            `statfs failed for ${recordingsDir} — skipping watermark prune: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
         break;
       }
       if (usedFraction <= retention.diskHighWatermark) break;
-      const oldest = this.db.segmentsStartedBefore(Number.MAX_SAFE_INTEGER, 1)[0];
-      if (!oldest) break;
+      const oldest = this.db.segmentsStartedBefore(floorMs, 1)[0];
+      if (!oldest) {
+        if (now - this.lastFloorErrorMs >= PRUNE_LOG_THROTTLE_MS) {
+          this.lastFloorErrorMs = now;
+          this.log.error(
+            `disk is over the high watermark (${Math.round(usedFraction * 100)}%) but every ` +
+              `remaining segment is under the 24h prune floor — cannot free more space`,
+          );
+        }
+        break;
+      }
       this.deleteSegmentRow(oldest);
       removed++;
     }
     if (removed > 0) this.log.info(`retention pruned ${removed} segment(s)`);
+    this.pruneLocalRows(now);
+  }
+
+  /** Drop 30-day-old local event rows and dead upload/backup queue leftovers. */
+  private pruneLocalRows(nowMs: number): void {
+    const dropped = this.db.pruneOldRows(nowMs - EVENT_MAX_AGE_MS);
+    for (const row of [...dropped.uploads, ...dropped.gdrive]) {
+      if (!this.db.clipReferenced(row.event_id)) {
+        rmSync(row.file, { recursive: true, force: true });
+      }
+    }
+    const queued = dropped.uploads.length + dropped.gdrive.length;
+    if (dropped.events > 0 || queued > 0) {
+      this.log.info(
+        `pruned ${dropped.events} local event row(s) and ${queued} stale queue job(s) (>30d)`,
+      );
+    }
+  }
+
+  /**
+   * Disk-full escape hatch (wired to NodeDb's SQLITE_FULL handler): delete the
+   * oldest segments beyond the 24h floor right now so writes can proceed.
+   * Rate-limited so repeated failing writes cannot loop it.
+   */
+  emergencyPrune(): void {
+    const now = Date.now();
+    if (now - this.lastEmergencyPruneMs < EMERGENCY_PRUNE_MIN_INTERVAL_MS) return;
+    this.lastEmergencyPruneMs = now;
+    const rows = this.db.segmentsStartedBefore(now - PRUNE_FLOOR_MS, 50);
+    if (rows.length === 0) {
+      this.log.error(
+        "disk full but every remaining segment is under the 24h prune floor — cannot free space",
+      );
+      return;
+    }
+    for (const row of rows) this.deleteSegmentRow(row);
+    this.log.warn(`emergency prune (disk full) removed ${rows.length} oldest segment(s)`);
   }
 
   private deleteSegmentRow(row: SegmentRow): void {
@@ -452,6 +609,22 @@ export class Recorder {
     }
     return { path: outPath };
   }
+}
+
+/** Resolve when the child has exited, or after capMs (whichever is first). */
+function waitForExit(proc: ChildProcess, capMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const cap = setTimeout(resolve, capMs);
+    cap.unref();
+    proc.once("exit", () => {
+      clearTimeout(cap);
+      resolve();
+    });
+  });
 }
 
 function dayName(date: Date): string {

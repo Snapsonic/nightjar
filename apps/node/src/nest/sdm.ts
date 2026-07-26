@@ -20,6 +20,8 @@ const REDIRECT_URI = "https://www.google.com";
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
 /** Device list cache TTL — keeps the 5s UI poll from hammering the SDM API. */
 const DEVICES_TTL_MS = 60_000;
+/** Token health probe interval — catches grants revoked from the Google side. */
+const PROBE_INTERVAL_MS = 15 * 60_000;
 const CAMERA_TRAIT = "sdm.devices.traits.CameraLiveStream";
 const INFO_TRAIT = "sdm.devices.traits.Info";
 
@@ -155,6 +157,7 @@ export class NestBridge {
   private token: TokenFile | null = null;
   private lastError: string | null = null;
   private devicesCache: { devices: NestDevice[]; fetchedAtMs: number } | null = null;
+  private probeTimer: NodeJS.Timeout | null = null;
   private readonly emitter = new Emitter<void>();
   private readonly log: Logger;
 
@@ -169,6 +172,42 @@ export class NestBridge {
   /** Fires after connect/disconnect so the go2rtc config can re-render. */
   onChange(listener: () => void): () => void {
     return this.emitter.on(listener);
+  }
+
+  /* ---------- token health probe ---------- */
+
+  /**
+   * Every 15 min (while connected) make a cheap SDM call so a grant revoked
+   * from the Google side surfaces as an actionable error instead of go2rtc's
+   * nest sources silently dying. invalid_grant already drops the token (see
+   * getAccessToken), so the error logs once and later probes no-op.
+   */
+  startProbe(): void {
+    if (this.probeTimer) return;
+    this.probeTimer = setInterval(() => void this.probe(), PROBE_INTERVAL_MS);
+    this.probeTimer.unref();
+  }
+
+  stopProbe(): void {
+    if (this.probeTimer) {
+      clearInterval(this.probeTimer);
+      this.probeTimer = null;
+    }
+  }
+
+  private async probe(): Promise<void> {
+    if (!this.token || !this.credentials()) return;
+    try {
+      await this.listDevices(true); // cache bypass — must hit the SDM API
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("invalid_grant")) {
+        this.lastError = "Google access revoked — reconnect in the Nest card";
+        this.log.error(`nest token probe: ${this.lastError}`);
+      } else {
+        this.log.warn(`nest token probe failed: ${message}`);
+      }
+    }
   }
 
   /* ---------- credentials & token file ---------- */

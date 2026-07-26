@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { CameraConfig } from "@nightjar/shared";
+import { jitterMs, SPAWN_STAGGER_MS } from "../backoff.js";
 import { captureSubUrl } from "../cameras/streams.js";
 import { Emitter } from "../emitter.js";
 import type { ConfigStore } from "../config/store.js";
@@ -30,6 +31,8 @@ const BACKOFF_START_MS = 1_000;
 const BACKOFF_CAP_MS = 300_000;
 const STABLE_MS = 30_000;
 const KILL_GRACE_MS = 3_000;
+/** ffmpeg input rw_timeout (microseconds): abort a wedged RTSP read after 30s. */
+const INPUT_RW_TIMEOUT_US = "30000000";
 
 export type MotionEvent =
   | {
@@ -116,12 +119,16 @@ export class MotionDetector {
         if (zonesChanged) this.rebuildMasks(cam);
       }
     }
+    let index = 0;
     for (const camera of wanted.values()) {
-      if (!this.running.has(camera.id)) this.start(camera);
+      // Stagger fresh spawns by camera index so a node (re)start doesn't herd
+      // every decoder onto the upstream at once.
+      if (!this.running.has(camera.id)) this.start(camera, index * SPAWN_STAGGER_MS);
+      index++;
     }
   }
 
-  start(camera: CameraConfig): void {
+  start(camera: CameraConfig, delayMs = 0): void {
     if (this.stopped || this.running.has(camera.id)) return;
     const cam: CameraMotion = {
       camera,
@@ -142,11 +149,22 @@ export class MotionDetector {
     };
     this.logMasks(cam);
     this.running.set(camera.id, cam);
-    this.spawn(cam);
+    if (delayMs > 0) {
+      cam.restartTimer = setTimeout(() => {
+        cam.restartTimer = null;
+        this.spawn(cam);
+      }, delayMs);
+      cam.restartTimer.unref();
+    } else {
+      this.spawn(cam);
+    }
     // Safety net: end motion even if the stream stalls without exiting.
     cam.quietTimer = setInterval(() => this.checkQuiet(cam), 2_000);
     cam.quietTimer.unref();
-    this.log.info(`motion detection started for camera ${camera.id} ("${camera.name}")`);
+    this.log.info(
+      `motion detection started for camera ${camera.id} ("${camera.name}")` +
+        (delayMs > 0 ? ` — first spawn in ${Math.round(delayMs / 1000)}s` : ""),
+    );
   }
 
   stop(cameraId: string): void {
@@ -161,10 +179,31 @@ export class MotionDetector {
     this.log.info(`motion detection stopped for camera ${cameraId}`);
   }
 
-  stopAll(): void {
+  /** Stop everything; resolves once every child has exited (or the kill-grace cap). */
+  async stopAll(): Promise<void> {
     this.stopped = true;
     this.unsubscribe();
+    const procs = [...this.running.values()]
+      .map((cam) => cam.proc)
+      .filter((proc): proc is ChildProcess => proc !== null);
     for (const cameraId of [...this.running.keys()]) this.stop(cameraId);
+    await Promise.all(
+      procs.map(
+        (proc) =>
+          new Promise<void>((resolve) => {
+            if (proc.exitCode !== null || proc.signalCode !== null) {
+              resolve();
+              return;
+            }
+            const cap = setTimeout(resolve, KILL_GRACE_MS);
+            cap.unref();
+            proc.once("exit", () => {
+              clearTimeout(cap);
+              resolve();
+            });
+          }),
+      ),
+    );
   }
 
   /** Subscribe to motion events. Returns an unsubscribe function. */
@@ -181,6 +220,9 @@ export class MotionDetector {
       "-nostdin",
       "-loglevel", "error",
       "-rtsp_transport", "tcp",
+      // Abort (and let the restart path recover) when the input socket
+      // stalls — a half-open TCP connection otherwise wedges ffmpeg forever.
+      "-rw_timeout", INPUT_RW_TIMEOUT_US,
       "-i", this.streamUrl(cam.camera),
       "-vf", `fps=${FPS},scale=${FRAME_WIDTH}:${FRAME_HEIGHT},format=gray`,
       "-f", "rawvideo",
@@ -206,15 +248,16 @@ export class MotionDetector {
       this.endMotion(cam);
       if (cam.stopping || this.stopped) return;
       if (Date.now() - cam.spawnedAt > STABLE_MS) cam.backoffMs = BACKOFF_START_MS;
+      const delayMs = jitterMs(cam.backoffMs);
       const tail = cam.stderrTail.trim().split("\n").pop() ?? "";
       this.log.warn(
         `motion ffmpeg for camera ${cam.camera.id} exited (code=${code} signal=${signal})` +
-          `${tail ? ` — ${tail}` : ""} — restarting in ${Math.round(cam.backoffMs / 1000)}s`,
+          `${tail ? ` — ${tail}` : ""} — restarting in ${Math.round(delayMs / 1000)}s`,
       );
       cam.restartTimer = setTimeout(() => {
         cam.restartTimer = null;
         this.spawn(cam);
-      }, cam.backoffMs);
+      }, delayMs);
       cam.restartTimer.unref();
       cam.backoffMs = Math.min(cam.backoffMs * 2, BACKOFF_CAP_MS);
     });

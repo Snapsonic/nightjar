@@ -26,9 +26,17 @@ import type { NestStreamParams } from "../nest/sdm.js";
  * node's SDM OAuth client secret and refresh token — since that made the file
  * secret-bearing, it is always written with mode 0600.
  */
+/** All go2rtc API fetches time out after this — a hung go2rtc must not hang us. */
+const FETCH_TIMEOUT_MS = 5_000;
+const RESTART_RETRY_MS = 15_000;
+const RESTART_RETRY_MAX = 20;
+
 export class Go2rtcSupervisor {
   private readonly configDir: string;
   private unsubscribe: (() => void) | null = null;
+  private stopping = false;
+  /** True while the restart-poke retry loop is running (never stack a second). */
+  private restartRetryActive = false;
   /** Camera ids already warned about (nest camera without a connected account). */
   private readonly warnedSkipped = new Set<string>();
 
@@ -55,6 +63,7 @@ export class Go2rtcSupervisor {
   }
 
   stop(): void {
+    this.stopping = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
   }
@@ -186,17 +195,57 @@ export class Go2rtcSupervisor {
     renameSync(tmp, file);
     this.log.info(`wrote ${file}`);
 
-    try {
-      await fetch(`${this.apiUrl()}/api/restart`, { method: "POST" });
-      this.log.info("asked go2rtc to restart");
-    } catch {
-      this.log.warn("go2rtc restart request failed (is go2rtc running?)");
+    if (!(await this.pokeRestart())) {
+      this.log.warn("go2rtc restart request failed (is go2rtc running?) — will retry");
+      this.retryRestartPoke();
     }
+  }
+
+  /** POST /api/restart once; true when the request went through. */
+  private async pokeRestart(): Promise<boolean> {
+    try {
+      await fetch(`${this.apiUrl()}/api/restart`, {
+        method: "POST",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      this.log.info("asked go2rtc to restart");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A failed restart poke means go2rtc never picked up the yaml we just wrote
+   * — retry every 15s (max 20 tries) until go2rtc is healthy, then poke once.
+   * Only one retry loop runs at a time; a fresh sync that pokes successfully
+   * makes the pending loop's extra poke harmless (restart on same config).
+   */
+  private retryRestartPoke(): void {
+    if (this.restartRetryActive) return;
+    this.restartRetryActive = true;
+    void (async () => {
+      try {
+        for (let attempt = 0; attempt < RESTART_RETRY_MAX && !this.stopping; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, RESTART_RETRY_MS).unref());
+          if (this.stopping) return;
+          if (!(await this.health())) continue;
+          if (await this.pokeRestart()) return;
+        }
+        if (!this.stopping) {
+          this.log.warn("go2rtc restart poke abandoned — go2rtc never became healthy");
+        }
+      } finally {
+        this.restartRetryActive = false;
+      }
+    })();
   }
 
   async health(): Promise<boolean> {
     try {
-      const res = await fetch(`${this.apiUrl()}/api`);
+      const res = await fetch(`${this.apiUrl()}/api`, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       return res.ok;
     } catch {
       return false;
@@ -206,7 +255,9 @@ export class Go2rtcSupervisor {
   /** Configured stream map from go2rtc, or null when go2rtc is unreachable. */
   async streams(): Promise<Record<string, unknown> | null> {
     try {
-      const res = await fetch(`${this.apiUrl()}/api/streams`);
+      const res = await fetch(`${this.apiUrl()}/api/streams`, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!res.ok) return null;
       const data: unknown = await res.json();
       if (data !== null && typeof data === "object" && !Array.isArray(data)) {

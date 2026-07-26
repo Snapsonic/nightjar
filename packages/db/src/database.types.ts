@@ -203,6 +203,7 @@ export type Database = {
       notification_deliveries: {
         Row: {
           camera_id: string
+          channel: string
           id: string
           kind: string
           sent_at: string
@@ -210,6 +211,7 @@ export type Database = {
         }
         Insert: {
           camera_id: string
+          channel?: string
           id?: string
           kind: string
           sent_at?: string
@@ -217,6 +219,7 @@ export type Database = {
         }
         Update: {
           camera_id?: string
+          channel?: string
           id?: string
           kind?: string
           sent_at?: string
@@ -286,16 +289,22 @@ export type Database = {
           created_at: string
           display_name: string | null
           id: string
+          notify_email: string | null
+          notify_phone: string | null
         }
         Insert: {
           created_at?: string
           display_name?: string | null
           id: string
+          notify_email?: string | null
+          notify_phone?: string | null
         }
         Update: {
           created_at?: string
           display_name?: string | null
           id?: string
+          notify_email?: string | null
+          notify_phone?: string | null
         }
         Relationships: []
       }

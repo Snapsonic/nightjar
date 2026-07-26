@@ -172,7 +172,7 @@ export function PushNotificationsCard({
     deviceCount === 1 ? "1 device receives alerts" : `${deviceCount} devices receive alerts`;
 
   return (
-    <section className="rounded-2xl border border-night-600 bg-night-850 p-6">
+    <section id="push-devices" className="rounded-2xl border border-night-600 bg-night-850 p-6">
       <h2 className="text-sm font-semibold text-fog-100">Push notifications on this device</h2>
       <p className="mt-1 text-xs leading-relaxed text-fog-500">
         Get an alert the moment a detection starts, even when Nightjar is closed. {deviceSummary}.

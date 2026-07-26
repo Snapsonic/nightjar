@@ -1,0 +1,168 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@negrel/http-ece@0.7.0": "0.7.0",
+    "jsr:@negrel/webpush@0.5.0": "0.5.0",
+    "jsr:@std/bytes@1": "1.0.6",
+    "jsr:@std/encoding@1": "1.0.11",
+    "jsr:@supabase/supabase-js@2": "2.110.8",
+    "npm:@supabase/auth-js@2.110.8": "2.110.8",
+    "npm:@supabase/functions-js@2.110.8": "2.110.8",
+    "npm:@supabase/postgrest-js@2.110.8": "2.110.8",
+    "npm:@supabase/realtime-js@2.110.8": "2.110.8",
+    "npm:@supabase/storage-js@2.110.8": "2.110.8"
+  },
+  "jsr": {
+    "@negrel/http-ece@0.7.0": {
+      "integrity": "068e61ba6f52da5454051a283cc19621607f8dd6e74d55c01bb365b8c6644076",
+      "dependencies": [
+        "jsr:@std/bytes",
+        "jsr:@std/encoding"
+      ]
+    },
+    "@negrel/webpush@0.5.0": {
+      "integrity": "919ed5bf4d676923667c5278093f36ffb2efe7fe2f155b6d32723ea3b73fa693",
+      "dependencies": [
+        "jsr:@negrel/http-ece",
+        "jsr:@std/bytes",
+        "jsr:@std/encoding"
+      ]
+    },
+    "@std/bytes@1.0.6": {
+      "integrity": "f6ac6adbd8ccd99314045f5703e23af0a68d7f7e58364b47d2c7f408aeb5820a"
+    },
+    "@std/encoding@1.0.11": {
+      "integrity": "e7cef2f0b3153bccc17431e7c864a1de03a4b6d9647389c43e08aaa775d37385"
+    },
+    "@supabase/supabase-js@2.110.8": {
+      "integrity": "cca2005b5b6f7b52c1113085528fc1cd3506d373d9e4cc304fc8fe92d4fa0e1a",
+      "dependencies": [
+        "npm:@supabase/auth-js",
+        "npm:@supabase/functions-js",
+        "npm:@supabase/postgrest-js",
+        "npm:@supabase/realtime-js",
+        "npm:@supabase/storage-js"
+      ]
+    }
+  },
+  "npm": {
+    "@supabase/auth-js@2.110.8": {
+      "integrity": "sha512-TQ5neTUDX2C2WmyYa03yGhLMkhdE/SkHXtK8/qxO/APUy3rsymsJCBP48p4jcN6iO2G0ow6RRexQd2mX+dSyJg==",
+      "dependencies": [
+        "tslib"
+      ]
+    },
+    "@supabase/functions-js@2.110.8": {
+      "integrity": "sha512-5yB9TLYzvv2oSQxwb0gamEvIAsuH66pVt7AM/pz03S7wN6ehD34GNgbShrccetqPedXQSz7e/1hAJ9NeEhoZVg==",
+      "dependencies": [
+        "tslib"
+      ]
+    },
+    "@supabase/phoenix@0.4.5": {
+      "integrity": "sha512-aAn9H9ovVyeApKy11OWOrrOGq8DV68yWeH4ud2lN9fzn4aO8Zb5GLL9m1pUg9nLqIcT+ZDfAcsZe0E/nqdv2lw=="
+    },
+    "@supabase/postgrest-js@2.110.8": {
+      "integrity": "sha512-QeRROxl1PpOZw5Jzi7BwdN9icsycMrLlCCvsjS0hYLW+nZoaT46zdagz/glJirj8jHF4jSd5Jyipuae2cBClCw==",
+      "dependencies": [
+        "tslib"
+      ]
+    },
+    "@supabase/realtime-js@2.110.8": {
+      "integrity": "sha512-mwX7ituX6O31fLf+0g65rpLlNxqgnMaPltPsQwzox6jfmbfVl3tCxXrfr3HEsQcCRjpjuJG1+A0vFzP1yVjKHA==",
+      "dependencies": [
+        "@supabase/phoenix",
+        "tslib"
+      ]
+    },
+    "@supabase/storage-js@2.110.8": {
+      "integrity": "sha512-CcfhkZFBLxsthgUabZKxwfsoXdrikIGsL3LsGoV3FZTqCMx/s1y49taT4jT/oya5+1IuB0sFFHw6pF0o0iJniQ==",
+      "dependencies": [
+        "iceberg-js",
+        "tslib"
+      ]
+    },
+    "iceberg-js@0.8.1": {
+      "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA=="
+    },
+    "tslib@2.8.1": {
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:prettier@^3.4.2",
+        "npm:turbo@^2.5.0",
+        "npm:typescript@^5.7.3"
+      ]
+    },
+    "members": {
+      "apps/marketing": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@tailwindcss/postcss@^4.1.11",
+            "npm:@types/node@^22.15.0",
+            "npm:@types/react-dom@^19.1.0",
+            "npm:@types/react@^19.1.0",
+            "npm:next@^15.4.0",
+            "npm:react-dom@^19.1.0",
+            "npm:react@^19.1.0",
+            "npm:tailwindcss@^4.1.11",
+            "npm:typescript@^5.8.3"
+          ]
+        }
+      },
+      "apps/node": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@fastify/static@^8.0.4",
+            "npm:@supabase/supabase-js@^2.49.0",
+            "npm:@types/better-sqlite3@^7.6.12",
+            "npm:@types/node@^22.13.0",
+            "npm:better-sqlite3@^11.8.0",
+            "npm:fastify@^5.2.1",
+            "npm:jpeg-js@~0.4.4",
+            "npm:onnxruntime-node@^1.27.0",
+            "npm:tsx@^4.19.2",
+            "npm:typescript@^5.7.3",
+            "npm:zod@^3.25.76"
+          ]
+        }
+      },
+      "apps/web": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@supabase/ssr@~0.12.3",
+            "npm:@supabase/supabase-js@^2.49.0",
+            "npm:@tailwindcss/postcss@^4.1.4",
+            "npm:@types/node@^22.13.0",
+            "npm:@types/react-dom@^19.1.0",
+            "npm:@types/react@^19.1.0",
+            "npm:next@^15.3.0",
+            "npm:react-dom@^19.1.0",
+            "npm:react@^19.1.0",
+            "npm:tailwindcss@^4.1.4",
+            "npm:typescript@^5.7.3",
+            "npm:zod@^3.25.76"
+          ]
+        }
+      },
+      "packages/db": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@supabase/supabase-js@^2.49.0",
+            "npm:typescript@^5.7.3"
+          ]
+        }
+      },
+      "packages/shared": {
+        "packageJson": {
+          "dependencies": [
+            "npm:typescript@^5.7.3",
+            "npm:zod@^3.25.76"
+          ]
+        }
+      }
+    }
+  }
+}

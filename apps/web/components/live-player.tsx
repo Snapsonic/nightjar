@@ -13,6 +13,11 @@ type MicState = "none" | "ready" | "denied" | "insecure";
 
 const ICE_GATHER_TIMEOUT_MS = 3_000;
 const WHEP_ANSWER_TIMEOUT_MS = 15_000;
+/** "disconnected" often self-heals (wifi blip, wake from sleep) — wait this
+ *  long before declaring the stream lost. */
+const DISCONNECT_GRACE_MS = 5_000;
+/** Automatic reconnect backoff after a failure; after these, manual Retry only. */
+const AUTO_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 
 /** Resolves when ICE gathering completes, or after `timeoutMs` (trickle fallback). */
 function waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
@@ -65,6 +70,9 @@ export function LivePlayer({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
+  /** Automatic retries consumed since the last successful connection. */
+  const autoRetryRef = useRef(0);
+  const stateRef = useRef<ConnState>("connecting");
   const [started, setStarted] = useState(autoConnect);
   const [state, setState] = useState<ConnState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -80,11 +88,23 @@ export function LivePlayer({
     : false;
 
   useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
     if (!started) return;
     let cancelled = false;
     let pc: RTCPeerConnection | null = null;
     let channel: NodeChannel | null = null;
     let micStream: MediaStream | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearGrace = () => {
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+        graceTimer = null;
+      }
+    };
 
     const fail = (message: string) => {
       if (!cancelled) {
@@ -111,9 +131,16 @@ export function LivePlayer({
             setMicState("insecure");
           } else {
             try {
-              micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              if (cancelled) {
+                // Unmounted while the permission prompt was open — release the
+                // mic immediately, or the recording indicator stays on.
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+              }
+              micStream = stream;
             } catch {
-              setMicState("denied");
+              if (!cancelled) setMicState("denied");
             }
           }
         }
@@ -145,14 +172,27 @@ export function LivePlayer({
           if (cancelled || !pc) return;
           switch (pc.connectionState) {
             case "connected":
+              clearGrace();
+              autoRetryRef.current = 0; // fresh backoff budget after recovery
               setState("connected");
               setError(null);
               break;
             case "failed":
+              clearGrace();
               fail("The media connection failed. Your network may be blocking WebRTC.");
               break;
             case "disconnected":
-              fail("The media connection was lost.");
+              // Grace period: only treat it as a failure if it doesn't recover.
+              graceTimer ??= setTimeout(() => {
+                graceTimer = null;
+                const current = pc?.connectionState;
+                if (
+                  !cancelled &&
+                  (current === "disconnected" || current === "failed" || current === "closed")
+                ) {
+                  fail("The media connection was lost.");
+                }
+              }, DISCONNECT_GRACE_MS);
               break;
             default:
               break;
@@ -168,8 +208,14 @@ export function LivePlayer({
         if (!sdp) throw new Error("Could not build a WebRTC offer.");
 
         // 5. Signal through the node's private channel.
-        channel = await NodeChannel.connect(getBrowserClient(), nodeId);
-        if (cancelled) return;
+        const connected = await NodeChannel.connect(getBrowserClient(), nodeId);
+        if (cancelled) {
+          // Unmounted mid-connect — release the shared channel reference now,
+          // the cleanup below already ran and can't see this handle.
+          connected.close();
+          return;
+        }
+        channel = connected;
         const answerSdp = await channel.requestWhepAnswer(
           cameraId,
           sdp,
@@ -180,6 +226,10 @@ export function LivePlayer({
 
         await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
       } catch (err) {
+        // Failed attempts must not hold the mic open until unmount.
+        micStream?.getTracks().forEach((track) => track.stop());
+        micStream = null;
+        micTrackRef.current = null;
         fail(errorMessage(err));
       }
     };
@@ -188,6 +238,7 @@ export function LivePlayer({
 
     return () => {
       cancelled = true;
+      clearGrace();
       channel?.close();
       pc?.close();
       micTrackRef.current = null;
@@ -196,6 +247,37 @@ export function LivePlayer({
       if (video) video.srcObject = null;
     };
   }, [cameraId, nodeId, attempt, wantsTalkback, started]);
+
+  // Auto-reconnect with capped backoff (5s → 10s → 20s, then manual Retry
+  // only). `attempt` is a dep so each failed automatic attempt reschedules.
+  useEffect(() => {
+    if (!started || state !== "failed") return;
+    const used = autoRetryRef.current;
+    if (used >= AUTO_RETRY_DELAYS_MS.length) return;
+    const timer = setTimeout(() => {
+      autoRetryRef.current = used + 1;
+      setAttempt((n) => n + 1);
+    }, AUTO_RETRY_DELAYS_MS[used] ?? 20_000);
+    return () => clearTimeout(timer);
+  }, [started, state, attempt]);
+
+  // Coming back from a hidden tab / sleep / offline network: if the stream is
+  // broken, reconnect right away with a fresh automatic-retry budget.
+  useEffect(() => {
+    if (!started) return;
+    const retryIfBroken = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (stateRef.current !== "failed") return;
+      autoRetryRef.current = 0;
+      setAttempt((n) => n + 1);
+    };
+    document.addEventListener("visibilitychange", retryIfBroken);
+    window.addEventListener("online", retryIfBroken);
+    return () => {
+      document.removeEventListener("visibilitychange", retryIfBroken);
+      window.removeEventListener("online", retryIfBroken);
+    };
+  }, [started]);
 
   const toggleMute = () => {
     const video = videoRef.current;
@@ -267,7 +349,10 @@ export function LivePlayer({
                 {error && <p className="max-w-md text-xs leading-relaxed text-fog-400">{error}</p>}
                 <button
                   type="button"
-                  onClick={() => setAttempt((n) => n + 1)}
+                  onClick={() => {
+                    autoRetryRef.current = 0;
+                    setAttempt((n) => n + 1);
+                  }}
                   className="mt-1 rounded-lg bg-ember-500 px-4 py-2 text-sm font-semibold text-night-950 transition-colors hover:bg-ember-400"
                 >
                   Retry

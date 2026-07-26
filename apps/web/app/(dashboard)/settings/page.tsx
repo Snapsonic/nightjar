@@ -2,13 +2,14 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import {
   DisplayNameForm,
+  NotificationChannels,
   NotificationToggles,
   PlanCard,
   SignOutButton,
 } from "@/components/settings-forms";
 import { PushNotificationsCard } from "@/components/push-settings";
 import { createClient } from "@/lib/supabase/server";
-import { toPlan } from "@/lib/utils";
+import { parseChannels, toPlan } from "@/lib/utils";
 
 export const metadata: Metadata = {
   title: "Settings — Nightjar",
@@ -22,11 +23,15 @@ export default async function SettingsPage() {
   if (!user) redirect("/login");
 
   const [profileRes, subscriptionRes, notificationRes, pushCountRes] = await Promise.all([
-    supabase.from("profiles").select("display_name").eq("id", user.id).maybeSingle(),
+    supabase
+      .from("profiles")
+      .select("display_name, notify_email, notify_phone")
+      .eq("id", user.id)
+      .maybeSingle(),
     supabase.from("subscriptions").select("plan, status").eq("owner_id", user.id).maybeSingle(),
     supabase
       .from("notification_settings")
-      .select("kinds")
+      .select("kinds, channels")
       .eq("user_id", user.id)
       .is("camera_id", null)
       .maybeSingle(),
@@ -72,6 +77,21 @@ export default async function SettingsPage() {
             <NotificationToggles
               userId={user.id}
               initialKinds={notificationRes.data?.kinds ?? ["person", "package"]}
+            />
+          </div>
+          <h3 className="mt-6 text-xs font-semibold uppercase tracking-wider text-fog-400">
+            Channels
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-fog-500">
+            Where those alerts go. Push, email and SMS share the same detections above.
+          </p>
+          <div className="mt-3">
+            <NotificationChannels
+              userId={user.id}
+              initialChannels={parseChannels(notificationRes.data?.channels)}
+              initialNotifyEmail={profileRes.data?.notify_email ?? ""}
+              initialNotifyPhone={profileRes.data?.notify_phone ?? ""}
+              accountEmail={user.email ?? ""}
             />
           </div>
         </section>

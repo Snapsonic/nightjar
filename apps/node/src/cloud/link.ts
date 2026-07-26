@@ -15,7 +15,7 @@ import type { ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
 import type { Go2rtcSupervisor } from "../go2rtc/supervisor.js";
 import type { Logger } from "../log.js";
-import type { Recorder } from "../recorder/recorder.js";
+import { isCaptureLive, type Recorder } from "../recorder/recorder.js";
 import { clampExportRange, clipSpans, dayBoundsMs, mergeCoverage } from "../recorder/coverage.js";
 import { getPreviewFrame, previewBucketMs } from "../recorder/preview.js";
 import {
@@ -52,6 +52,17 @@ class LinkError extends Error {
   }
 }
 
+/** An edge function rejected the node's credentials (HTTP 401). */
+class CloudAuthError extends Error {}
+
+/**
+ * Module-level go2rtc frame-fetch cooldown: when the last frame attempt for
+ * ANY camera failed within the past 10s, snapshot requests make a single
+ * attempt instead of the full retry loop — 5 tiles x 4 retries would
+ * otherwise herd a dead go2rtc.
+ */
+let lastFrameFailureAtMs = 0;
+
 interface NodeToken {
   accessToken: string;
   expiresAt: string;
@@ -83,6 +94,14 @@ const HEARTBEAT_MS = 60_000;
 const TIMELINE_CLEANUP_MS = 6 * 3_600_000;
 const BACKOFF_START_MS = 1_000;
 const BACKOFF_CAP_MS = 60_000;
+/** A session that survives this long resets the reconnect backoff. */
+const SESSION_STABLE_MS = 30_000;
+/** Slow poll while the cloud rejects our credentials (don't hot-loop a 401). */
+const AUTH_REJECTED_POLL_MS = 10 * 60_000;
+/** Timeout for plain fetches (edge functions, go2rtc). */
+const FETCH_TIMEOUT_MS = 5_000;
+/** See lastFrameFailureAtMs. */
+const FRAME_FAILURE_COOLDOWN_MS = 10_000;
 
 /**
  * Cloud link state machine:
@@ -180,10 +199,16 @@ export class CloudLink {
         authorization: `Bearer ${settings.anonKey}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`${name} failed: HTTP ${res.status} ${detail}`.trim());
+      const message = `${name} failed: HTTP ${res.status} ${detail}`.trim();
+      // 401 = the cloud rejected our credentials (e.g. node row deleted). A
+      // claimed node must NOT re-register (it would orphan itself) — the run
+      // loop surfaces this state and slows down instead.
+      if (res.status === 401) throw new CloudAuthError(message);
+      throw new Error(message);
     }
     return res.json();
   }
@@ -197,9 +222,34 @@ export class CloudLink {
         await this.ensureRegistered();
         const token = await this.pollUntilClaimed();
         if (!token) return; // stopped
-        backoff = BACKOFF_START_MS;
+        const sessionStartedAt = Date.now();
         await this.session(token);
+        // A session that flapped (died <30s in) must not reset the backoff —
+        // that turns e.g. a rejected channel into a 1s reconnect hot-loop.
+        if (Date.now() - sessionStartedAt >= SESSION_STABLE_MS) {
+          backoff = BACKOFF_START_MS;
+        } else if (this.running) {
+          this.log.warn(
+            `cloud session ended ${Math.round((Date.now() - sessionStartedAt) / 1000)}s after ` +
+              `starting — backing off ${Math.round(backoff / 1000)}s`,
+          );
+          await this.sleep(backoff);
+          backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+        }
       } catch (err) {
+        if (err instanceof CloudAuthError) {
+          this.state = {
+            state: "error",
+            message: "cloud identity rejected — node may need re-pairing",
+          };
+          this.log.error(
+            `cloud rejected the node's credentials (${err.message}) — ` +
+              `retrying in ${Math.round(AUTH_REJECTED_POLL_MS / 60_000)} min; ` +
+              `if this persists the node may need re-pairing`,
+          );
+          await this.sleep(AUTH_REJECTED_POLL_MS);
+          continue;
+        }
         const message = err instanceof Error ? err.message : String(err);
         this.state = { state: "error", message };
         this.log.warn(`cloud link error: ${message} — retrying in ${Math.round(backoff / 1000)}s`);
@@ -495,6 +545,7 @@ export class CloudLink {
         method: "POST",
         headers: { "content-type": "application/sdp" },
         body: message.sdp,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch {
       throw new LinkError("go2rtc_unreachable", "go2rtc is not responding");
@@ -516,23 +567,30 @@ export class CloudLink {
     // (re)start — retry inside the node (the browser waits 30s anyway) rather
     // than surfacing every warm-up as an error tile.
     const frameUrl = `${this.deps.go2rtc.apiUrl()}/api/frame.jpeg?src=${encodeURIComponent(go2rtcStreamName(camera.id))}`;
+    // When a frame fetch for ANY camera just failed, go2rtc is likely down or
+    // struggling — make a single attempt instead of herding it with retries.
+    const attempts =
+      Date.now() - lastFrameFailureAtMs < FRAME_FAILURE_COOLDOWN_MS ? 1 : 4;
     let bytes: ArrayBuffer | null = null;
     let lastFailure = "snapshot unavailable";
-    for (let attempt = 0; attempt < 4 && bytes === null; attempt++) {
+    for (let attempt = 0; attempt < attempts && bytes === null; attempt++) {
       if (attempt > 0) await this.sleep(4_000);
       let res: Response;
       try {
-        res = await fetch(frameUrl);
+        res = await fetch(frameUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       } catch {
+        lastFrameFailureAtMs = Date.now();
         throw new LinkError("go2rtc_unreachable", "go2rtc is not responding");
       }
       if (!res.ok) {
+        lastFrameFailureAtMs = Date.now();
         lastFailure = `snapshot returned HTTP ${res.status}`;
         continue;
       }
       const body = await res.arrayBuffer();
       if (body.byteLength === 0) {
         // go2rtc can 200 with an empty body while a stream is starting.
+        lastFrameFailureAtMs = Date.now();
         lastFailure = "snapshot was empty (stream starting?)";
         continue;
       }
@@ -712,11 +770,25 @@ export class CloudLink {
 
   private async onStatusRequest(requestId: string): Promise<void> {
     const streams = await this.deps.go2rtc.streams();
-    const cameras = this.deps.cameras.list().map((camera) => ({
-      cameraId: camera.id,
-      online: streams !== null && go2rtcStreamName(camera.id) in streams,
-      recording: camera.enabled && camera.record,
-    }));
+    const now = Date.now();
+    const cameras = this.deps.cameras.list().map((camera) => {
+      const recording = camera.enabled && camera.record;
+      const lastSegmentAtMs = this.deps.recorder.lastSegmentAt(camera.id);
+      const capturing = isCaptureLive(lastSegmentAtMs, now);
+      return {
+        cameraId: camera.id,
+        // Recording cameras report real capture liveness (segments actually
+        // landing); others keep the go2rtc-config heuristic.
+        online: recording
+          ? capturing
+          : streams !== null && go2rtcStreamName(camera.id) in streams,
+        recording,
+        capturing,
+        ...(lastSegmentAtMs !== null
+          ? { lastSegmentAt: new Date(lastSegmentAtMs).toISOString() }
+          : {}),
+      };
+    });
 
     let disk: DiskInfo;
     try {
