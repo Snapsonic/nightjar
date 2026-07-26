@@ -154,6 +154,18 @@ export class Go2rtcSupervisor {
       // Skip the opus transcode only when the camera is known to have no
       // audio (hasAudio === false); unknown (older configs) gets it too —
       // a stream without audio degrades to an inactive audio m-line.
+      // Nest cameras get exactly ONE stream with ONE source. Every extra
+      // source is another thing go2rtc can decide to start, and every start
+      // asks Google to mint a new SDM stream against a per-minute project
+      // quota — the fan-out (main + _sub + two opus loopbacks per camera) was
+      // enough to keep that quota permanently saturated, which stopped
+      // recording entirely. The cost is live-view audio on Nest cameras:
+      // their AAC cannot ride WebRTC without the opus transcode. Recording
+      // keeps its original audio either way.
+      if (camera.source === "nest") {
+        pushStream(go2rtcStreamName(camera.id), main, false);
+        continue;
+      }
       const withOpus = camera.capabilities.hasAudio !== false;
       pushStream(go2rtcStreamName(camera.id), main, withOpus);
       pushStream(go2rtcStreamName(camera.id, true), sub, withOpus);

@@ -45,6 +45,20 @@ The node's configuration lives in `config.json` inside the config directory (`/c
 
 If no URL/key is available from config or environment, the cloud link simply stays disabled — the node runs local-only.
 
+### `backup.gdrive`
+
+Settings for [Google Drive backup](/guides/recording-and-events#google-drive-backup). Normally toggled from the dashboard's "Google Drive backup" card (or the local UI); the block is additive — existing configs without it keep parsing.
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `false` | Copy newly closed events to your Drive |
+| `folderName` | string (1–80) | `"Nightjar"` | Top-level Drive folder clips are filed under |
+| `shareLinks` | boolean | `false` | Give each newly backed-up clip an "anyone with the link" reader permission |
+| `clientId` | string | — | Your own Google OAuth "TVs and Limited Input devices" client |
+| `clientSecret` | string | — | Its secret |
+
+Client credentials resolve per field: environment variable, then this block, then the client baked into the build (official images only). The OAuth tokens themselves are **not** in `config.json` — they live in `${CONFIG_DIR}/gdrive-token.json` (mode 0600) and never leave the node.
+
 ### `nest`
 
 Credentials for the experimental [Nest camera bridge](/guides/cameras#nest-cameras-experimental-sdm-bridge) (Google Smart Device Management). All optional; normally filled in from the local UI's "Nest cameras" card. The block is additive — existing configs without it keep parsing.
@@ -101,6 +115,8 @@ Motion and detection thresholds (frame diff limits, YOLOX confidence, clip pre/p
 | `CONFIG_DIR` | `/config` | Where `config.json` and `identity.json` live |
 | `DB_DIR` | `/db` | SQLite database directory |
 | `GO2RTC_CONFIG_DIR` | — | Where the node renders `go2rtc.yaml` for the go2rtc process |
+| `NIGHTJAR_GOOGLE_CLIENT_ID` | — | OAuth client for [Google Drive backup](/guides/recording-and-events#google-drive-backup). Overrides `backup.gdrive.clientId` |
+| `NIGHTJAR_GOOGLE_CLIENT_SECRET` | — | Its secret. Overrides `backup.gdrive.clientSecret` |
 | `PORT` | `8080` | Local UI/API port |
 | `LOG_LEVEL` | `info` | Set `debug` for verbose logs |
 

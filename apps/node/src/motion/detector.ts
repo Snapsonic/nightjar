@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { CameraConfig } from "@nightjar/shared";
-import { jitterMs, SPAWN_STAGGER_MS } from "../backoff.js";
+import { jitterMs, SPAWN_STAGGER_MS, StreamBreaker, StreamStartGate } from "../backoff.js";
 import { captureSubUrl } from "../cameras/streams.js";
 import { Emitter } from "../emitter.js";
+import { rtspInputArgs } from "../ffmpeg.js";
 import type { ConfigStore } from "../config/store.js";
 import type { Logger } from "../log.js";
 import { buildZoneMasks, diffFrame, topZoneId, type ZoneMasks } from "./zones.js";
@@ -31,8 +32,6 @@ const BACKOFF_START_MS = 1_000;
 const BACKOFF_CAP_MS = 300_000;
 const STABLE_MS = 30_000;
 const KILL_GRACE_MS = 3_000;
-/** ffmpeg input rw_timeout (microseconds): abort a wedged RTSP read after 30s. */
-const INPUT_RW_TIMEOUT_US = "30000000";
 
 export type MotionEvent =
   | {
@@ -90,6 +89,10 @@ export class MotionDetector {
   constructor(
     private readonly store: ConfigStore,
     private readonly log: Logger,
+    /** Shared with the recorder — see Recorder's constructor. */
+    private readonly breaker: StreamBreaker = new StreamBreaker(),
+    /** Shared with the recorder — see Recorder's constructor. */
+    private readonly gate: StreamStartGate = new StreamStartGate(),
   ) {
     this.unsubscribe = this.store.onChange(() => this.sync());
   }
@@ -214,16 +217,17 @@ export class MotionDetector {
   /* ---------- decoding ---------- */
 
   private spawn(cam: CameraMotion): void {
+    void this.gate.acquire().then(() => {
+      if (cam.stopping || this.stopped) return;
+      this.spawnNow(cam);
+    });
+  }
+
+  private spawnNow(cam: CameraMotion): void {
     if (cam.stopping || this.stopped) return;
     // prettier-ignore
     const args = [
-      "-nostdin",
-      "-loglevel", "error",
-      "-rtsp_transport", "tcp",
-      // Abort (and let the restart path recover) when the input socket
-      // stalls — a half-open TCP connection otherwise wedges ffmpeg forever.
-      "-rw_timeout", INPUT_RW_TIMEOUT_US,
-      "-i", this.streamUrl(cam.camera),
+      ...rtspInputArgs(this.streamUrl(cam.camera)),
       "-vf", `fps=${FPS},scale=${FRAME_WIDTH}:${FRAME_HEIGHT},format=gray`,
       "-f", "rawvideo",
       "-",
@@ -247,8 +251,13 @@ export class MotionDetector {
       cam.proc = null;
       this.endMotion(cam);
       if (cam.stopping || this.stopped) return;
-      if (Date.now() - cam.spawnedAt > STABLE_MS) cam.backoffMs = BACKOFF_START_MS;
-      const delayMs = jitterMs(cam.backoffMs);
+      if (Date.now() - cam.spawnedAt > STABLE_MS) {
+        cam.backoffMs = BACKOFF_START_MS;
+        this.breaker.recordSuccess();
+      } else {
+        this.breaker.recordFailure();
+      }
+      const delayMs = Math.max(jitterMs(cam.backoffMs), this.breaker.waitMs());
       const tail = cam.stderrTail.trim().split("\n").pop() ?? "";
       this.log.warn(
         `motion ffmpeg for camera ${cam.camera.id} exited (code=${code} signal=${signal})` +

@@ -150,6 +150,103 @@ export const UpdateZonesReply = z.object({
   ok: z.literal(true),
 });
 
+/* ---------- Google Drive backup ("bring your own cloud") ---------- */
+
+export const GdriveQuota = z.object({
+  usageBytes: z.number().nonnegative(),
+  /** null when the account reports no storage limit. */
+  limitBytes: z.number().nonnegative().nullable(),
+});
+
+/**
+ * The node's Drive-backup state, relayed to the cloud dashboard so Drive can
+ * be connected from app.nightjar.ca instead of only the node's LAN UI.
+ *
+ * Deliberately token-free: the OAuth refresh/access tokens live only in
+ * `${CONFIG_DIR}/gdrive-token.json` on the node and never touch this channel.
+ * The one credential-adjacent value here is the device-flow `userCode`, which
+ * is worthless on its own — it only becomes a grant once the signed-in user
+ * approves it at `verificationUrl`. The device flow explicitly allows the
+ * approving device to differ from the device showing the code, which is what
+ * makes this relay safe.
+ *
+ * Zod strips unknown keys, so even a mistaken extra field on the node side
+ * cannot ride along to the browser.
+ */
+const gdriveStatusFields = {
+  status: z.enum(["notConfigured", "disconnected", "connecting", "connected", "error"]),
+  /** connected: Google account holding the grant (null when not yet known). */
+  email: z.string().nullable().optional(),
+  /** connected: Drive folder clips are filed under. */
+  folderName: z.string().optional(),
+  /** connected: backup.gdrive.enabled. */
+  enabled: z.boolean().optional(),
+  /** connected: backup.gdrive.shareLinks. */
+  shareLinks: z.boolean().optional(),
+  /** connected: jobs waiting in the node's gdrive_queue. */
+  queued: z.number().int().nonnegative().optional(),
+  quota: GdriveQuota.nullable().optional(),
+  /** connecting: the short code to type at `verificationUrl`. */
+  userCode: z.string().optional(),
+  verificationUrl: z.string().optional(),
+  /** connecting: ISO time the code stops working. */
+  expiresAt: z.string().optional(),
+  /** error: human-readable reason. */
+  message: z.string().optional(),
+};
+
+export const GdriveStatusRequest = z.object({
+  type: z.literal("gdrive_status_request"),
+  ...base,
+});
+
+export const GdriveStatusReply = z.object({
+  type: z.literal("gdrive_status_reply"),
+  ...base,
+  ...gdriveStatusFields,
+});
+
+/** Start the device flow; the reply carries the connecting state + userCode. */
+export const GdriveConnectRequest = z.object({
+  type: z.literal("gdrive_connect_request"),
+  ...base,
+});
+
+export const GdriveConnectReply = z.object({
+  type: z.literal("gdrive_connect_reply"),
+  ...base,
+  ...gdriveStatusFields,
+});
+
+/** Flip either backup switch; omitted fields are left alone. */
+export const GdriveToggleRequest = z.object({
+  type: z.literal("gdrive_toggle_request"),
+  ...base,
+  enabled: z.boolean().optional(),
+  shareLinks: z.boolean().optional(),
+});
+
+export const GdriveToggleReply = z.object({
+  type: z.literal("gdrive_toggle_reply"),
+  ...base,
+  ...gdriveStatusFields,
+});
+
+/** Revoke the grant at Google and delete the node's token file. */
+export const GdriveDisconnectRequest = z.object({
+  type: z.literal("gdrive_disconnect_request"),
+  ...base,
+});
+
+export const GdriveDisconnectReply = z.object({
+  type: z.literal("gdrive_disconnect_reply"),
+  ...base,
+  ...gdriveStatusFields,
+});
+
+/** The status payload shared by all four Drive replies (sans envelope). */
+export type GdriveStatusPayload = Omit<z.infer<typeof GdriveStatusReply>, "type" | "requestId">;
+
 export const ErrorReply = z.object({
   type: z.literal("error"),
   ...base,
@@ -174,6 +271,14 @@ export const RealtimeMessage = z.discriminatedUnion("type", [
   TimelineExportReply,
   UpdateZonesRequest,
   UpdateZonesReply,
+  GdriveStatusRequest,
+  GdriveStatusReply,
+  GdriveConnectRequest,
+  GdriveConnectReply,
+  GdriveToggleRequest,
+  GdriveToggleReply,
+  GdriveDisconnectRequest,
+  GdriveDisconnectReply,
   ErrorReply,
 ]);
 export type RealtimeMessage = z.infer<typeof RealtimeMessage>;

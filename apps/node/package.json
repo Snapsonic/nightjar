@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "build": "tsc --noEmit",
     "test": "tsx --test",
-    "fetch-model": "node scripts/fetch-model.mjs"
+    "fetch-model": "node scripts/fetch-model.mjs",
+    "bake-oauth": "node scripts/bake-oauth.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.4",

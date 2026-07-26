@@ -2,6 +2,7 @@ import { readFileSync, statfsSync } from "node:fs";
 import { z } from "zod";
 import { createNightjarClient, type Json, type NightjarClient } from "@nightjar/db";
 import {
+  type GdriveStatusPayload,
   NodeRegisterResponse,
   REALTIME_BROADCAST_EVENT,
   RealtimeMessage,
@@ -9,6 +10,7 @@ import {
   nodeTopic,
 } from "@nightjar/shared";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+import type { GdriveBackup, GdriveStatus } from "../backup/gdrive.js";
 import type { CameraManager } from "../cameras/manager.js";
 import type { IdentityStore } from "../config/identity.js";
 import type { ConfigStore } from "../config/store.js";
@@ -33,6 +35,7 @@ type TimelineCoverageMessage = Extract<RealtimeMessage, { type: "timeline_covera
 type TimelineExportMessage = Extract<RealtimeMessage, { type: "timeline_export_request" }>;
 type TimelinePreviewMessage = Extract<RealtimeMessage, { type: "timeline_preview_request" }>;
 type UpdateZonesMessage = Extract<RealtimeMessage, { type: "update_zones_request" }>;
+type GdriveToggleMessage = Extract<RealtimeMessage, { type: "gdrive_toggle_request" }>;
 type DiskInfo = Extract<RealtimeMessage, { type: "status_reply" }>["disk"];
 
 const TokenResponse = z.object({
@@ -83,6 +86,8 @@ export interface CloudLinkDeps {
   go2rtc: Go2rtcSupervisor;
   db: NodeDb;
   recorder: Recorder;
+  /** Drive backup, so the cloud dashboard can drive the device flow remotely. */
+  gdrive: GdriveBackup;
   version: string;
   log: Logger;
 }
@@ -506,6 +511,26 @@ export class CloudLink {
       case "update_zones_request":
         await this.replyOrError(message.requestId, () => this.onUpdateZones(message));
         break;
+      case "gdrive_status_request":
+        await this.replyOrError(message.requestId, () =>
+          this.sendGdrive("gdrive_status_reply", message.requestId, this.deps.gdrive.getStatus()),
+        );
+        break;
+      case "gdrive_connect_request":
+        await this.replyOrError(message.requestId, () =>
+          this.sendGdrive(
+            "gdrive_connect_reply",
+            message.requestId,
+            this.deps.gdrive.startConnect(),
+          ),
+        );
+        break;
+      case "gdrive_toggle_request":
+        await this.replyOrError(message.requestId, () => this.onGdriveToggle(message));
+        break;
+      case "gdrive_disconnect_request":
+        await this.replyOrError(message.requestId, () => this.onGdriveDisconnect(message.requestId));
+        break;
       default:
         // Replies (possibly our own echoes) — nothing to do.
         break;
@@ -563,6 +588,15 @@ export class CloudLink {
     const nodeId = this.getNodeId();
     if (!client || !nodeId) throw new LinkError("internal", "cloud session not ready");
 
+    // Cheapest and most reliable source first: a frame from the footage we are
+    // already recording. This costs nothing upstream, so a dashboard full of
+    // tiles can no longer contribute to the SDM rate limiting that stops
+    // recording. go2rtc is only asked when there is no recent segment.
+    const fromDisk = await this.deps.recorder.latestFrame(camera.id).catch(() => null);
+    if (fromDisk && fromDisk.length > 0) {
+      return await this.uploadSnapshot(client, nodeId, message, fromDisk);
+    }
+
     // SDM streams churn routinely, so a snapshot request often lands mid
     // (re)start — retry inside the node (the browser waits 30s anyway) rather
     // than surfacing every warm-up as an error tile.
@@ -597,7 +631,16 @@ export class CloudLink {
       bytes = body;
     }
     if (bytes === null) throw new LinkError("camera_offline", lastFailure);
+    await this.uploadSnapshot(client, nodeId, message, new Uint8Array(bytes));
+  }
 
+  /** Store a snapshot and reply with a short-lived signed URL. */
+  private async uploadSnapshot(
+    client: NightjarClient,
+    nodeId: string,
+    message: SnapshotRequestMessage,
+    bytes: Uint8Array,
+  ): Promise<void> {
     const storagePath = `${nodeId}/snap-${message.cameraId}-${Date.now()}.jpg`;
     const { error: uploadError } = await client.storage
       .from("snapshots")
@@ -766,6 +809,83 @@ export class CloudLink {
       `zones updated for camera ${message.cameraId} (${message.zones.length} zone(s))`,
     );
     await this.send({ type: "update_zones_reply", requestId: message.requestId, ok: true });
+  }
+
+  /* ---------- Google Drive backup (mirrors /api/backup/gdrive) ---------- */
+
+  /**
+   * GdriveStatus -> wire payload, field by field on purpose.
+   *
+   * This is the security boundary of the whole feature: the OAuth tokens stay
+   * in `${CONFIG_DIR}/gdrive-token.json` on the node, and the cloud only ever
+   * relays a short device code plus display state. Never spread a status (or
+   * anything token-bearing) into this object — enumerate what leaves.
+   */
+  private gdrivePayload(status: GdriveStatus): GdriveStatusPayload {
+    switch (status.status) {
+      case "connecting":
+        return {
+          status: "connecting",
+          userCode: status.userCode,
+          verificationUrl: status.verificationUrl,
+          expiresAt: status.expiresAt,
+        };
+      case "connected":
+        return {
+          status: "connected",
+          email: status.email,
+          folderName: status.folderName,
+          enabled: status.enabled,
+          shareLinks: status.shareLinks,
+          queued: status.queued,
+          quota: status.quota,
+        };
+      case "error":
+        return { status: "error", message: status.message };
+      case "notConfigured":
+      case "disconnected":
+        return { status: status.status };
+    }
+  }
+
+  private async sendGdrive(
+    type:
+      | "gdrive_status_reply"
+      | "gdrive_connect_reply"
+      | "gdrive_toggle_reply"
+      | "gdrive_disconnect_reply",
+    requestId: string,
+    status: GdriveStatus | Promise<GdriveStatus>,
+  ): Promise<void> {
+    await this.send({ type, requestId, ...this.gdrivePayload(await status) });
+  }
+
+  /** Flip backup.gdrive.enabled / .shareLinks; omitted fields are left alone. */
+  private async onGdriveToggle(message: GdriveToggleMessage): Promise<void> {
+    if (message.enabled !== undefined || message.shareLinks !== undefined) {
+      const backup = this.deps.store.get().backup;
+      this.deps.store.update({
+        backup: {
+          ...backup,
+          gdrive: {
+            ...backup.gdrive,
+            ...(message.enabled !== undefined ? { enabled: message.enabled } : {}),
+            ...(message.shareLinks !== undefined ? { shareLinks: message.shareLinks } : {}),
+          },
+        },
+      });
+      this.log.info(
+        `gdrive backup settings updated from the cloud dashboard` +
+          `${message.enabled !== undefined ? ` (enabled=${message.enabled})` : ""}` +
+          `${message.shareLinks !== undefined ? ` (shareLinks=${message.shareLinks})` : ""}`,
+      );
+    }
+    await this.sendGdrive("gdrive_toggle_reply", message.requestId, this.deps.gdrive.getStatus());
+  }
+
+  private async onGdriveDisconnect(requestId: string): Promise<void> {
+    await this.deps.gdrive.disconnect();
+    await this.sendGdrive("gdrive_disconnect_reply", requestId, this.deps.gdrive.getStatus());
   }
 
   private async onStatusRequest(requestId: string): Promise<void> {

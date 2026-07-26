@@ -12,10 +12,11 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 import type { CameraConfig } from "@nightjar/shared";
-import { jitterMs, SPAWN_STAGGER_MS } from "../backoff.js";
+import { jitterMs, SPAWN_STAGGER_MS, StreamBreaker, StreamStartGate } from "../backoff.js";
 import { captureMainUrl } from "../cameras/streams.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb, SegmentRow } from "../db.js";
+import { rtspInputArgs } from "../ffmpeg.js";
 import type { Logger } from "../log.js";
 
 const execFileAsync = promisify(execFile);
@@ -44,8 +45,6 @@ export const PRUNE_FLOOR_MS = 24 * 3_600_000;
 const PRUNE_LOG_THROTTLE_MS = 3_600_000;
 /** Emergency (disk-full) prunes are rate-limited to one per this interval. */
 const EMERGENCY_PRUNE_MIN_INTERVAL_MS = 30_000;
-/** ffmpeg input rw_timeout (microseconds): abort a wedged RTSP read after 30s. */
-const INPUT_RW_TIMEOUT_US = "30000000";
 
 /**
  * Capture liveness threshold: a camera counts as capturing when its newest
@@ -97,6 +96,11 @@ export class Recorder {
     private readonly db: NodeDb,
     private readonly store: ConfigStore,
     private readonly log: Logger,
+    /** Shared with the motion detector: stream creation is a per-project
+     *  quota, so the breaker has to count failures across every capture. */
+    private readonly breaker: StreamBreaker = new StreamBreaker(),
+    /** Shared with the motion detector — paces starts across all captures. */
+    private readonly gate: StreamStartGate = new StreamStartGate(),
   ) {
     this.unsubscribe = this.store.onChange(() => this.sync());
     this.pruneTimer = setInterval(() => {
@@ -216,6 +220,34 @@ export class Recorder {
   }
 
   /** Newest indexed segment instant for a camera (unix ms), from the SQLite index. */
+  /**
+   * Newest frame from what is already on disk, as JPEG bytes.
+   *
+   * Snapshots used to come from go2rtc's frame endpoint, which makes Google
+   * mint an SDM stream on a cold camera — so a dashboard full of tiles was
+   * itself a source of the rate-limiting that broke recording. We are already
+   * writing every second of video to disk; read from that instead. Returns
+   * null when there is no recent segment (e.g. record=false cameras), and the
+   * caller falls back to go2rtc.
+   */
+  async latestFrame(cameraId: string, maxAgeMs = 120_000): Promise<Buffer | null> {
+    const segments = this.db.segmentsBetween(cameraId, Date.now() - maxAgeMs, Date.now());
+    const newest = segments.at(-1);
+    if (!newest) return null;
+    try {
+      const { stdout } = await execFileAsync(
+        "ffmpeg",
+        // -sseof seeks from the end: the most recent decodable frame.
+        ["-nostdin", "-loglevel", "error", "-sseof", "-3", "-i", newest.path,
+         "-frames:v", "1", "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+        { timeout: 15_000, maxBuffer: 12 * 1024 * 1024, encoding: "buffer" },
+      );
+      return stdout.length > 0 ? stdout : null;
+    } catch {
+      return null;
+    }
+  }
+
   lastSegmentAt(cameraId: string): number | null {
     return this.db.latestSegmentAt(cameraId);
   }
@@ -232,6 +264,16 @@ export class Recorder {
   }
 
   private spawn(rec: CameraRecording): void {
+    // Take a turn at the shared gate before touching the upstream. Fire and
+    // forget: the gate resolves in order, and stop() clears rec.stopping so a
+    // queued turn for a removed camera is dropped here.
+    void this.gate.acquire().then(() => {
+      if (rec.stopping || this.stopped) return;
+      this.spawnNow(rec);
+    });
+  }
+
+  private spawnNow(rec: CameraRecording): void {
     if (rec.stopping || this.stopped) return;
     const dir = this.cameraDir(rec.camera.id);
     // ffmpeg's segment muxer does not create directories — pre-create today's.
@@ -239,13 +281,7 @@ export class Recorder {
 
     // prettier-ignore
     const args = [
-      "-nostdin",
-      "-loglevel", "error",
-      "-rtsp_transport", "tcp",
-      // Abort (and let the restart path recover) when the input socket
-      // stalls — a half-open TCP connection otherwise wedges ffmpeg forever.
-      "-rw_timeout", INPUT_RW_TIMEOUT_US,
-      "-i", this.captureUrl(rec.camera),
+      ...rtspInputArgs(this.captureUrl(rec.camera)),
       "-c", "copy",
       "-map", "0",
       "-f", "segment",
@@ -283,8 +319,17 @@ export class Recorder {
         );
       }
       if (rec.stopping || this.stopped) return;
-      if (Date.now() - rec.spawnedAt > STABLE_MS) rec.backoffMs = BACKOFF_START_MS;
-      const delayMs = jitterMs(rec.backoffMs);
+      const lived = Date.now() - rec.spawnedAt;
+      if (lived > STABLE_MS) {
+        rec.backoffMs = BACKOFF_START_MS;
+        this.breaker.recordSuccess();
+      } else if (this.breaker.recordFailure()) {
+        this.log.error(
+          "too many capture failures across cameras — pausing all captures for " +
+            `${Math.round(this.breaker.waitMs() / 1000)}s so the upstream rate limit can clear`,
+        );
+      }
+      const delayMs = Math.max(jitterMs(rec.backoffMs), this.breaker.waitMs());
       const tail = rec.stderrTail.trim().split("\n").pop() ?? "";
       this.log.warn(
         `ffmpeg for camera ${rec.camera.id} exited (code=${code} signal=${signal})` +

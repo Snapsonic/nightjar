@@ -7,10 +7,11 @@ import {
   PlanCard,
   SignOutButton,
 } from "@/components/settings-forms";
+import { DriveBackupCards } from "@/components/drive-settings";
 import { PushNotificationsCard } from "@/components/push-settings";
 import { SharingSettings } from "@/components/sharing-settings";
 import { createClient } from "@/lib/supabase/server";
-import { parseChannels, toPlan } from "@/lib/utils";
+import { isNodeOnline, parseChannels, toNodeStatus, toPlan } from "@/lib/utils";
 
 export const metadata: Metadata = {
   title: "Settings — Nightjar",
@@ -23,7 +24,7 @@ export default async function SettingsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [profileRes, subscriptionRes, notificationRes, pushCountRes, driveClipRes] =
+  const [profileRes, subscriptionRes, notificationRes, pushCountRes, driveClipRes, nodesRes] =
     await Promise.all([
     supabase
       .from("profiles")
@@ -50,6 +51,12 @@ export default async function SettingsPage() {
         .select("event_id", { count: "exact", head: true })
         .not("drive_url", "is", null)
         .limit(1),
+      // Drive is connected per node (the tokens live on the node), so the
+      // Drive card is rendered once per paired node.
+      supabase
+        .from("nodes")
+        .select("id, name, status, last_seen_at")
+        .order("created_at", { ascending: true }),
     ]);
 
   const firstError = profileRes.error ?? subscriptionRes.error ?? notificationRes.error;
@@ -60,6 +67,14 @@ export default async function SettingsPage() {
       </div>
     );
   }
+
+  // A nodes-query failure only costs the Drive cards, not the whole page.
+  const now = Date.now();
+  const driveNodes = (nodesRes.data ?? []).map((node) => ({
+    id: node.id,
+    name: node.name,
+    online: isNodeOnline(toNodeStatus(node.status), node.last_seen_at, now),
+  }));
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -124,6 +139,8 @@ export default async function SettingsPage() {
         </section>
 
         <PushNotificationsCard userId={user.id} initialDeviceCount={pushCountRes.count ?? 0} />
+
+        <DriveBackupCards nodes={driveNodes} />
 
         <section className="rounded-2xl border border-night-600 bg-night-850 p-6">
           <h2 className="text-sm font-semibold text-fog-100">Session</h2>

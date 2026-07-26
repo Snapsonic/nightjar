@@ -73,3 +73,38 @@ When paired, this is the complete list of what the node uploads:
 The upload queue is offline-safe: it survives restarts, retries with backoff, and is bounded to the newest 500 events. If the internet is down, events queue locally and upload when the link returns.
 
 Cloud clips carry an expiry. Currently uploads are stamped with a **3-day expiry** — the Free plan's window. Plus (30 days) and Pro (60 days) extend cloud event history; see [nightjar.ca](https://nightjar.ca/#pricing). Your local recordings and local event history follow your own retention settings regardless of plan.
+
+## Google Drive backup
+
+"Bring your own cloud": alongside the Nightjar cloud upload, a node can copy every event clip and thumbnail into **your own Google Drive**, where nothing expires and Nightjar never deletes anything. Files are filed as:
+
+```text
+<folder>/<camera name>/<YYYY-MM-DD>/<HHmmss>-<kind>.mp4   (+ .jpg thumbnail)
+```
+
+### Connecting
+
+Open **[Settings](https://app.nightjar.ca/settings)** in the dashboard and find the **Google Drive backup** card — one per paired node, because Drive is connected per node. Press **Connect Google Drive**, then enter the short code it shows at [google.com/device](https://google.com/device) on any device you are signed in to Google with. The card polls the node every 5 seconds and flips to the connected view by itself.
+
+The node's own LAN UI (`http://<node-ip>:8080`, "Your cloud backup") does the same thing, and is the path for nodes you never pair with an account.
+
+<Note>
+Sign-in uses Google's OAuth **device flow**, which is designed for exactly this split: the device that shows the code and the device that approves it do not have to be the same. The node runs the flow and keeps the resulting tokens in `${CONFIG_DIR}/gdrive-token.json` (mode 0600) on its own disk. Only the short code and display state (account email, folder, quota, queue length) ever cross the cloud channel — **your Google tokens never reach Nightjar's servers**.
+</Note>
+
+### Scope and what Nightjar can see
+
+The grant is `drive.file` **only**: the node can see and manage *just the files and folders it created itself*. It cannot read, list, or touch anything else in your Drive. **Disconnect** revokes the grant at Google and deletes the node's token file; clips already in your Drive stay there.
+
+### The two switches
+
+| Switch | What it does |
+| --- | --- |
+| **Back up event clips** | Copies newly closed events to your Drive. Forward-only — events recorded before you turned it on are not backfilled. |
+| **Make backed-up clips link-shareable** | Gives each newly backed-up clip an "anyone with the link can view" permission so alerts can link straight to it in your Drive. Anyone holding that URL can watch that clip, it applies only to clips uploaded from then on, and turning it back off does not un-share earlier ones. Off by default. |
+
+Uploads run from their own queue on the node: it survives restarts, retries with backoff (5 s → 5 min), and is bounded to the newest 500 events. Backing up does not consume your Nightjar plan's cloud storage, and Drive copies outlive the cloud clip expiry above.
+
+### "This build has no Google client configured"
+
+Running the device flow requires a Google OAuth client. Official Nightjar images ship with one, so hosted users have nothing to set up. A node you built yourself may not have one — supply your own (a "TVs and Limited Input devices" client with the `drive.file` scope) through `NIGHTJAR_GOOGLE_CLIENT_ID` / `NIGHTJAR_GOOGLE_CLIENT_SECRET` or `backup.gdrive.clientId` / `clientSecret` in `config.json`. Step-by-step: the [node README](https://github.com/Snapsonic/nightjar/blob/main/apps/node/README.md#google-drive-backup).

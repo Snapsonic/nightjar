@@ -11,6 +11,7 @@ import { Go2rtcSupervisor } from "./go2rtc/supervisor.js";
 import { createLogger } from "./log.js";
 import { MotionDetector } from "./motion/detector.js";
 import { NestBridge } from "./nest/sdm.js";
+import { StreamBreaker, StreamStartGate } from "./backoff.js";
 import { Recorder } from "./recorder/recorder.js";
 
 const VERSION = "0.1.0";
@@ -51,13 +52,23 @@ async function main(): Promise<void> {
   const cameras = new CameraManager(store, log.child("cameras"));
 
   // Recorder and motion detector reconcile themselves on config changes.
-  const recorder = new Recorder(db, store, log.child("recorder"));
+  // One breaker for both capture loops: the rate limit they trip is per
+  // Google project, not per camera or per consumer.
+  const streamBreaker = new StreamBreaker();
+  const streamGate = new StreamStartGate();
+  const recorder = new Recorder(db, store, log.child("recorder"), streamBreaker, streamGate);
   // Disk-full writes free the oldest recordings instead of failing repeatedly.
   db.setDiskFullHandler(() => recorder.emergencyPrune());
   recorder.sync();
-  const motion = new MotionDetector(store, log.child("motion"));
+  const motion = new MotionDetector(store, log.child("motion"), streamBreaker, streamGate);
   motion.sync();
   const detect = new DetectWorker(log.child("detect"));
+
+  // Optional user-owned Google Drive backup (device flow, drive.file scope).
+  // Constructed before the cloud link: the link relays the device flow to the
+  // dashboard at app.nightjar.ca, so it needs this instance.
+  const gdrive = new GdriveBackup({ db, store, log: log.child("gdrive") });
+  gdrive.start();
 
   const link = new CloudLink({
     store,
@@ -66,14 +77,11 @@ async function main(): Promise<void> {
     go2rtc,
     db,
     recorder,
+    gdrive,
     version: VERSION,
     log: log.child("cloud"),
   });
   link.start();
-
-  // Optional user-owned Google Drive backup (device flow, drive.file scope).
-  const gdrive = new GdriveBackup({ db, store, log: log.child("gdrive") });
-  gdrive.start();
 
   const pipeline = new EventPipeline({
     db,

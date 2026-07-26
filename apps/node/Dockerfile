@@ -41,6 +41,17 @@ RUN pnpm install --filter @nightjar/node... --prod=false
 # so the image must fetch them at build time for the detect worker.
 RUN pnpm --filter @nightjar/node fetch-model
 
+# Optional: bake a default Google OAuth client (device flow, drive.file scope)
+# into the image so hosted users can connect Drive from app.nightjar.ca with
+# nothing to configure. Empty by default — the repo never carries credentials,
+# and a build without these args leaves src/backup/default-oauth.ts untouched
+# (the feature then reports "not configured" unless env/config supplies one).
+ARG NIGHTJAR_GOOGLE_CLIENT_ID=""
+ARG NIGHTJAR_GOOGLE_CLIENT_SECRET=""
+RUN NIGHTJAR_GOOGLE_CLIENT_ID="$NIGHTJAR_GOOGLE_CLIENT_ID" \
+    NIGHTJAR_GOOGLE_CLIENT_SECRET="$NIGHTJAR_GOOGLE_CLIENT_SECRET" \
+    pnpm --filter @nightjar/node bake-oauth
+
 ENV NODE_ENV=production
 # Local UI/API (compose runs with network_mode: host).
 EXPOSE 8080

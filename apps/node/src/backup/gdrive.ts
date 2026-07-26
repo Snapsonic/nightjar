@@ -4,6 +4,7 @@ import { z } from "zod";
 import { configDir, type ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
 import type { Logger } from "../log.js";
+import { DEFAULT_GOOGLE_OAUTH } from "./default-oauth.js";
 
 /**
  * OAuth scope: drive.file ONLY — the node can see and manage only files and
@@ -225,14 +226,20 @@ export class GdriveBackup {
   /* ---------- credentials & token file ---------- */
 
   /**
-   * OAuth client credentials for the device flow. Env first, then config —
-   * absent on builds without them; the feature then shows as "not configured"
-   * in the UI (self-hosters supply their own client, see the node README).
+   * OAuth client credentials for the device flow, resolved per field: env var,
+   * then config.json (`backup.gdrive.*`), then the client baked into the image
+   * at build time (empty in the repo — see default-oauth.ts). Builds with none
+   * of the three report "not configured" in the UI, and self-hosters can
+   * always supply their own client (see the node README).
    */
   private credentials(): { clientId: string; clientSecret: string } | null {
     const gdrive = this.deps.store.get().backup.gdrive;
-    const clientId = process.env.NIGHTJAR_GOOGLE_CLIENT_ID || gdrive.clientId;
-    const clientSecret = process.env.NIGHTJAR_GOOGLE_CLIENT_SECRET || gdrive.clientSecret;
+    const clientId =
+      process.env.NIGHTJAR_GOOGLE_CLIENT_ID || gdrive.clientId || DEFAULT_GOOGLE_OAUTH.clientId;
+    const clientSecret =
+      process.env.NIGHTJAR_GOOGLE_CLIENT_SECRET ||
+      gdrive.clientSecret ||
+      DEFAULT_GOOGLE_OAUTH.clientSecret;
     if (!clientId || !clientSecret) return null;
     return { clientId, clientSecret };
   }

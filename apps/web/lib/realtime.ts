@@ -2,6 +2,11 @@ import {
   REALTIME_BROADCAST_EVENT,
   RealtimeMessage,
   nodeTopic,
+  type GdriveConnectRequest,
+  type GdriveDisconnectRequest,
+  type GdriveStatusPayload,
+  type GdriveStatusRequest,
+  type GdriveToggleRequest,
   type SnapshotRequest,
   type NodeStatusRequest,
   type TimelineCoverageRequest,
@@ -54,7 +59,11 @@ type ReplyMessage = Extract<
       | "timeline_coverage_reply"
       | "timeline_preview_reply"
       | "timeline_export_reply"
-      | "update_zones_reply";
+      | "update_zones_reply"
+      | "gdrive_status_reply"
+      | "gdrive_connect_reply"
+      | "gdrive_toggle_reply"
+      | "gdrive_disconnect_reply";
   }
 >;
 
@@ -67,7 +76,11 @@ type OutgoingRequest =
   | Omit<z.infer<typeof TimelineCoverageRequest>, "requestId">
   | Omit<z.infer<typeof TimelinePreviewRequest>, "requestId">
   | Omit<z.infer<typeof TimelineExportRequest>, "requestId">
-  | Omit<z.infer<typeof UpdateZonesRequest>, "requestId">;
+  | Omit<z.infer<typeof UpdateZonesRequest>, "requestId">
+  | Omit<z.infer<typeof GdriveStatusRequest>, "requestId">
+  | Omit<z.infer<typeof GdriveConnectRequest>, "requestId">
+  | Omit<z.infer<typeof GdriveToggleRequest>, "requestId">
+  | Omit<z.infer<typeof GdriveDisconnectRequest>, "requestId">;
 
 interface Pending {
   expect: readonly ReplyMessage["type"][];
@@ -264,7 +277,11 @@ class SharedCore {
       message.type === "timeline_coverage_request" ||
       message.type === "timeline_preview_request" ||
       message.type === "timeline_export_request" ||
-      message.type === "update_zones_request"
+      message.type === "update_zones_request" ||
+      message.type === "gdrive_status_request" ||
+      message.type === "gdrive_connect_request" ||
+      message.type === "gdrive_toggle_request" ||
+      message.type === "gdrive_disconnect_request"
     ) {
       return;
     }
@@ -363,6 +380,23 @@ class SharedCore {
     this.channel = null;
     if (channel) void this.supabase.removeChannel(channel).catch(() => undefined);
   }
+}
+
+/** Strips the envelope from any of the four Drive replies (they share fields). */
+function gdrivePayload(
+  reply: Extract<
+    ReplyMessage,
+    {
+      type:
+        | "gdrive_status_reply"
+        | "gdrive_connect_reply"
+        | "gdrive_toggle_reply"
+        | "gdrive_disconnect_reply";
+    }
+  >,
+): GdriveStatusPayload {
+  const { type: _type, requestId: _requestId, ...payload } = reply;
+  return payload;
 }
 
 /**
@@ -514,6 +548,55 @@ export class NodeChannel {
       { type: "update_zones_request", cameraId, zones },
       ["update_zones_reply"],
       timeoutMs,
+    );
+  }
+
+  /* ---------- Google Drive backup ----------
+   *
+   * The node keeps its OAuth tokens on disk and only ever relays display state
+   * plus the short device-flow code, which is useless until the signed-in user
+   * approves it at google.com/device. Nothing here carries a credential.
+   */
+
+  /** Current Drive-backup state of the node (also the connect-flow poll). */
+  async requestGdriveStatus(
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<GdriveStatusPayload> {
+    return gdrivePayload(
+      await this.request({ type: "gdrive_status_request" }, ["gdrive_status_reply"], timeoutMs),
+    );
+  }
+
+  /** Starts the device flow on the node; resolves with the code to display.
+   *  Longer timeout: the node has to reach Google before it can answer. */
+  async requestGdriveConnect(timeoutMs = 20_000): Promise<GdriveStatusPayload> {
+    return gdrivePayload(
+      await this.request({ type: "gdrive_connect_request" }, ["gdrive_connect_reply"], timeoutMs),
+    );
+  }
+
+  /** Flips either backup switch on the node; omitted fields are left alone. */
+  async requestGdriveToggle(
+    patch: { enabled?: boolean; shareLinks?: boolean },
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<GdriveStatusPayload> {
+    return gdrivePayload(
+      await this.request(
+        { type: "gdrive_toggle_request", ...patch },
+        ["gdrive_toggle_reply"],
+        timeoutMs,
+      ),
+    );
+  }
+
+  /** Revokes the grant at Google and deletes the node's token file. */
+  async requestGdriveDisconnect(timeoutMs = 20_000): Promise<GdriveStatusPayload> {
+    return gdrivePayload(
+      await this.request(
+        { type: "gdrive_disconnect_request" },
+        ["gdrive_disconnect_reply"],
+        timeoutMs,
+      ),
     );
   }
 

@@ -106,12 +106,27 @@ NodeConfig.
 "Bring your own cloud": in addition to the Nightjar cloud upload, the node
 can copy every event clip + thumbnail into **your own Google Drive**, under
 `<folderName>/<camera name>/<YYYY-MM-DD>/<HHmmss>-<kind>.mp4` (+ `.jpg`).
-Configure it from the local UI's "Your cloud backup" card.
+
+**Where to set it up.** For a paired node the primary path is the cloud
+dashboard — <https://app.nightjar.ca/settings>, "Google Drive backup" (one
+card per node). The node's own LAN UI ("Your cloud backup" card at
+`http://<node>:8080`) does exactly the same thing and is the alternative for
+unpaired/offline-by-design nodes.
+
+The dashboard path works because the device flow explicitly allows the device
+that *approves* a code to differ from the device that *shows* it: the cloud
+only relays a short user code and display state over the node's realtime
+channel (`gdrive_status_request` / `gdrive_connect_request` /
+`gdrive_toggle_request` / `gdrive_disconnect_request` in
+`packages/shared/src/protocol.ts`). **Tokens never ride that channel** — the
+node runs the flow itself and the grant stays in its token file. The handlers
+in `src/cloud/link.ts` enumerate every field they send for exactly this
+reason.
 
 How it works:
 
 - **Auth is the OAuth 2.0 Device Flow** ("TV and Limited-Input Device"
-  client): the node shows a short code, you enter it at
+  client): the node obtains a short code, you enter it at
   <https://google.com/device> on any device, and the node polls Google for
   the grant. No browser, redirect URI or inbound port on the node.
 - **Scope is `drive.file` only** — the node can see and manage *only files
@@ -129,14 +144,34 @@ How it works:
   once *both* queues are done with the event.
 
 Config (`config.json`, all optional): `backup.gdrive.enabled` (default
-false, toggled from the UI), `backup.gdrive.folderName` (default
-`"Nightjar"`), `backup.gdrive.clientId` / `backup.gdrive.clientSecret`
-(overrides for the env vars below).
+false, toggled from either UI), `backup.gdrive.shareLinks` (default false),
+`backup.gdrive.folderName` (default `"Nightjar"`),
+`backup.gdrive.clientId` / `backup.gdrive.clientSecret` (see the precedence
+below).
 
-**Supplying an OAuth client (self-hosters).** Google requires an OAuth
-client to run the device flow; official builds ship credentials via env, and
-without any the UI shows the feature as "not configured on this build". To
-create your own:
+**Where the OAuth client comes from.** Google requires an OAuth client to run
+the device flow at all. The node resolves the client id and secret **per
+field, in this order**:
+
+1. `NIGHTJAR_GOOGLE_CLIENT_ID` / `NIGHTJAR_GOOGLE_CLIENT_SECRET` in the
+   environment;
+2. `backup.gdrive.clientId` / `backup.gdrive.clientSecret` in `config.json`;
+3. the client compiled into the build — `src/backup/default-oauth.ts`, whose
+   values are **empty in git** and are baked at image build time from
+   `--build-arg NIGHTJAR_GOOGLE_CLIENT_ID=… --build-arg
+   NIGHTJAR_GOOGLE_CLIENT_SECRET=…` (the Dockerfile runs
+   `scripts/bake-oauth.mjs`). This is what lets a hosted user connect Drive
+   from app.nightjar.ca with nothing to configure.
+
+With none of the three the UI shows the feature as "not configured on this
+build".
+
+For the device-flow client type ("TVs and Limited Input devices") Google
+states the client secret **is not treated as confidential** — it is issued in
+the knowledge that it ships inside distributed apps, and it only ever unlocks
+a consent screen the user still has to approve, for the `drive.file` scope
+alone. Self-hosters who would rather not use Nightjar's client can supply
+their own via env or `config.json` (steps 1–2 above always win):
 
 1. In the [Google Cloud Console](https://console.cloud.google.com/), create
    (or pick) a project and enable the **Google Drive API**.
