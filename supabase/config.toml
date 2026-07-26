@@ -1,0 +1,8 @@
+# Per-function deploy config. The notify function is called by the
+# events_notify Postgres trigger via pg_net with a shared hook secret
+# (x-nightjar-hook) and no Authorization header, so JWT verification is off.
+# Orchestrator: deploy with `supabase functions deploy notify` from repo root
+# so this file is picked up (or pass --no-verify-jwt explicitly).
+
+[functions.notify]
+verify_jwt = false

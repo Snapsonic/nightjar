@@ -6,6 +6,7 @@ import {
   PlanCard,
   SignOutButton,
 } from "@/components/settings-forms";
+import { PushNotificationsCard } from "@/components/push-settings";
 import { createClient } from "@/lib/supabase/server";
 import { toPlan } from "@/lib/utils";
 
@@ -20,7 +21,7 @@ export default async function SettingsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [profileRes, subscriptionRes, notificationRes] = await Promise.all([
+  const [profileRes, subscriptionRes, notificationRes, pushCountRes] = await Promise.all([
     supabase.from("profiles").select("display_name").eq("id", user.id).maybeSingle(),
     supabase.from("subscriptions").select("plan, status").eq("owner_id", user.id).maybeSingle(),
     supabase
@@ -29,6 +30,10 @@ export default async function SettingsPage() {
       .eq("user_id", user.id)
       .is("camera_id", null)
       .maybeSingle(),
+    supabase
+      .from("push_subscriptions")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id),
   ]);
 
   const firstError = profileRes.error ?? subscriptionRes.error ?? notificationRes.error;
@@ -70,6 +75,8 @@ export default async function SettingsPage() {
             />
           </div>
         </section>
+
+        <PushNotificationsCard userId={user.id} initialDeviceCount={pushCountRes.count ?? 0} />
 
         <section className="rounded-2xl border border-night-600 bg-night-850 p-6">
           <h2 className="text-sm font-semibold text-fog-100">Session</h2>
