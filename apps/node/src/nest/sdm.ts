@@ -44,6 +44,22 @@ export const NEST_GOOGLE_ENDPOINTS: NestEndpoints = {
   api: "https://smartdevicemanagement.googleapis.com/v1",
 };
 
+/** An SDM executeCommand that came back non-2xx; `status` drives backoff. */
+export class NestCommandError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "NestCommandError";
+  }
+
+  /** SDM's per-project per-minute stream-command quota. */
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+}
+
 /** ${CONFIG_DIR}/nest-token.json (mode 0600, like gdrive-token.json). */
 const TokenFile = z.object({
   refreshToken: z.string(),
@@ -446,6 +462,43 @@ export class NestBridge {
       res = await doFetch(await this.getAccessToken(true));
     }
     return res;
+  }
+
+  /**
+   * SDM devices.executeCommand. Returns the command's `results` object.
+   *
+   * Used for the CameraLiveStream RTSP commands; on 401 it retries once with a
+   * force-refreshed access token, matching sdmFetch.
+   */
+  async executeCommand(
+    deviceId: string,
+    command: string,
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const creds = this.credentials();
+    if (!creds) throw new Error("nest credentials not configured");
+    const url = `${this.endpoints.api}/enterprises/${creds.projectId}/devices/${deviceId}:executeCommand`;
+    const doPost = async (accessToken: string): Promise<Response> =>
+      fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ command, params }),
+      });
+
+    let res = await doPost(await this.getAccessToken());
+    if (res.status === 401) res = await doPost(await this.getAccessToken(true));
+
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      const error = body.error as { message?: string } | undefined;
+      // Callers back off on 429 specifically: SDM rate-limits stream commands
+      // per project per minute, and retrying through it keeps it saturated.
+      throw new NestCommandError(error?.message ?? `HTTP ${res.status}`, res.status);
+    }
+    return (body.results as Record<string, unknown> | undefined) ?? {};
   }
 
   private formPost(url: string, params: Record<string, string>): Promise<Response> {

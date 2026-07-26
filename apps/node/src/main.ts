@@ -11,6 +11,7 @@ import { Go2rtcSupervisor } from "./go2rtc/supervisor.js";
 import { createLogger } from "./log.js";
 import { MotionDetector } from "./motion/detector.js";
 import { NestBridge } from "./nest/sdm.js";
+import { NestStreamManager } from "./nest/streams.js";
 import { StreamBreaker, StreamStartGate } from "./backoff.js";
 import { Recorder } from "./recorder/recorder.js";
 
@@ -43,11 +44,40 @@ async function main(): Promise<void> {
   const nest = new NestBridge({ store, log: log.child("nest") });
   nest.startProbe();
 
-  const go2rtc = new Go2rtcSupervisor(store, log.child("go2rtc"), undefined, () =>
-    nest.getStreamParams(),
+  // The node owns Nest stream lifetimes rather than letting go2rtc mint and
+  // renew its own — see nest/streams.ts for why that mattered.
+  const nestStreams = new NestStreamManager(nest, log.child("nest"));
+
+  const go2rtc = new Go2rtcSupervisor(
+    store,
+    log.child("go2rtc"),
+    undefined,
+    () => nest.getStreamParams(),
+    (cameraId) => nestStreams.urlFor(cameraId),
   );
   await go2rtc.start();
   nest.onChange(() => void go2rtc.resync());
+  // A new URL only appears when a stream is minted or its token rotates, so
+  // this re-render is rare and does not disturb established captures.
+  nestStreams.onChange(() => void go2rtc.resync());
+
+  const syncNestStreams = (): void => {
+    void nestStreams.syncCameras(
+      store
+        .get()
+        .cameras.filter((c) => c.enabled && c.source === "nest" && c.nest?.deviceId)
+        .map((c) => ({ id: c.id, deviceId: c.nest!.deviceId })),
+    );
+  };
+  syncNestStreams();
+  store.onChange(syncNestStreams);
+  nest.onChange(syncNestStreams);
+  // Periodic reconcile so a camera whose stream could not be minted (SDM
+  // quota exhausted, camera briefly offline) is retried instead of sitting on
+  // go2rtc's fallback forever. Cheap when everything is healthy — cameras that
+  // already hold a live stream are skipped.
+  const nestReconcile = setInterval(syncNestStreams, 60_000);
+  nestReconcile.unref();
 
   const cameras = new CameraManager(store, log.child("cameras"));
 
@@ -120,6 +150,8 @@ async function main(): Promise<void> {
       try {
         pipeline.stop();
         nest.stopProbe();
+        clearInterval(nestReconcile);
+        nestStreams.stopAll();
         go2rtc.stop();
         // Wait for every capture/decoder child to actually exit (3s cap each)
         // so ffmpeg processes are not orphaned mid-segment.

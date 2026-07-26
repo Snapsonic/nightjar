@@ -47,6 +47,9 @@ export class Go2rtcSupervisor {
     /** Provider for the Nest SDM params `nest:` sources need; null while the
      *  Nest account is not connected (those cameras are then skipped). */
     private readonly nestParams: () => NestStreamParams | null = () => null,
+    /** Node-managed SDM stream URL for a camera, when one has been acquired.
+     *  Preferred over go2rtc's own `nest:` source — see nest/streams.ts. */
+    private readonly nestStreamUrl: (cameraId: string) => string | null = () => null,
   ) {
     this.configDir = configDir;
   }
@@ -76,6 +79,15 @@ export class Go2rtcSupervisor {
   /** go2rtc source line for a camera's main stream, or null to skip it. */
   private renderSource(camera: CameraConfig): string | null {
     if (camera.source === "nest") {
+      // Preferred path: the node owns this stream's lifetime and keeps it
+      // extended, so go2rtc just consumes an RTSP URL and never calls SDM.
+      // That removes go2rtc's buggy renewal timer and its habit of minting a
+      // fresh stream on every reconnect, which is what exhausted the quota.
+      const managed = this.nestStreamUrl(camera.id);
+      if (managed) {
+        this.warnedSkipped.delete(camera.id);
+        return managed;
+      }
       const params = this.nestParams();
       if (!params || !camera.nest) {
         if (!this.warnedSkipped.has(camera.id)) {
