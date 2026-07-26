@@ -11,6 +11,8 @@ import { getSupabaseEnv } from "@/lib/env";
 import { formatDateTime, relativeTime } from "@/lib/utils";
 
 interface ShareView {
+  /** "pending" while the clip is still uploading from the node. */
+  status?: "pending";
   caption: string | null;
   kind: string;
   cameraName: string;
@@ -110,6 +112,27 @@ export default async function SharePage({
 }) {
   const { token } = await params;
   const share = await fetchShare(token);
+
+  // Alerts link to a clip the moment the event closes, so a link tapped
+  // straight from an SMS can beat the upload. Say "not ready" and refresh,
+  // rather than the misleading "no longer available".
+  if (share?.status === "pending") {
+    return (
+      <SharedFrame>
+        <meta httpEquiv="refresh" content="5" />
+        <div className="rounded-2xl border border-night-600 bg-night-850 px-6 py-14 text-center">
+          <div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-night-500 border-t-ember-400" />
+          <p className="mt-5 text-lg font-semibold text-fog-100">
+            {capitalize(share.kind)} at {share.cameraName}
+          </p>
+          <p className="mx-auto mt-2 max-w-sm text-sm text-fog-400">
+            The clip is still uploading from the camera. This page refreshes on its
+            own — it usually takes a few seconds.
+          </p>
+        </div>
+      </SharedFrame>
+    );
+  }
 
   if (!share) {
     return (

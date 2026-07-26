@@ -100,6 +100,8 @@ export type GdriveStatus =
       email: string | null;
       folderName: string;
       enabled: boolean;
+      /** backup.gdrive.shareLinks — anyone-with-the-link permission on new clips. */
+      shareLinks: boolean;
       queued: number;
       quota: { usageBytes: number; limitBytes: number | null } | null;
     }
@@ -277,6 +279,7 @@ export class GdriveBackup {
         email: this.about?.email ?? this.token?.email ?? null,
         folderName: gdrive.folderName,
         enabled: gdrive.enabled,
+        shareLinks: gdrive.shareLinks,
         queued: this.deps.db.countGdriveQueue(),
         quota: this.about?.quota ?? null,
       };
@@ -533,14 +536,15 @@ export class GdriveBackup {
 
   /* ---------- file upload (resumable) ---------- */
 
-  /** True when a non-trashed file with this name already exists in the folder. */
-  private async findFile(folderId: string, name: string): Promise<boolean> {
+  /** The existing non-trashed file with this name in the folder, if any. */
+  private async findFile(folderId: string, name: string): Promise<DriveFile | null> {
     const q = `name='${queryEscape(name)}' and '${queryEscape(folderId)}' in parents and trashed=false`;
     const res = await this.driveFetch(
-      `${this.endpoints.api}/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=1`,
+      `${this.endpoints.api}/files?q=${encodeURIComponent(q)}` +
+        `&fields=files(${FILE_FIELDS})&pageSize=1`,
     );
     if (!res.ok) throw new Error(`file lookup "${name}": HTTP ${res.status}`);
-    return FileList.parse(await res.json()).files.length > 0;
+    return FileList.parse(await res.json()).files[0] ?? null;
   }
 
   /**
@@ -548,24 +552,33 @@ export class GdriveBackup {
    * the bytes; a 308 response carries a Range header telling us how much the
    * server kept, and we resume from there with a Content-Range PUT. Skips the
    * upload entirely if the file already exists (idempotent across retries).
+   *
+   * `fields` on the session-initiation URL carries through to the final PUT
+   * response, so the completed upload hands back id + webViewLink in one round
+   * trip. Returns null when the response body is not a File resource — the
+   * bytes still landed, we just have no link to publish.
    */
   private async uploadFile(
     folderId: string,
     name: string,
     filePath: string,
     contentType: string,
-  ): Promise<void> {
-    if (await this.findFile(folderId, name)) return;
+  ): Promise<DriveFile | null> {
+    const existing = await this.findFile(folderId, name);
+    if (existing) return existing;
     const bytes = readFileSync(filePath);
-    const sessionRes = await this.driveFetch(`${this.endpoints.upload}/files?uploadType=resumable`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json; charset=UTF-8",
-        "x-upload-content-type": contentType,
-        "x-upload-content-length": String(bytes.length),
+    const sessionRes = await this.driveFetch(
+      `${this.endpoints.upload}/files?uploadType=resumable&fields=${FILE_FIELDS}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json; charset=UTF-8",
+          "x-upload-content-type": contentType,
+          "x-upload-content-length": String(bytes.length),
+        },
+        body: JSON.stringify({ name, parents: [folderId] }),
       },
-      body: JSON.stringify({ name, parents: [folderId] }),
-    });
+    );
     if (!sessionRes.ok) throw new Error(`resumable session "${name}": HTTP ${sessionRes.status}`);
     const sessionUrl = sessionRes.headers.get("location");
     if (!sessionUrl) throw new Error(`resumable session "${name}": missing Location header`);
@@ -581,7 +594,14 @@ export class GdriveBackup {
         headers,
         body: bytes.subarray(offset),
       });
-      if (res.ok) return;
+      if (res.ok) {
+        const parsed = FileResource.safeParse(await res.json().catch(() => null));
+        if (!parsed.success) {
+          this.log.warn(`upload "${name}": completed but returned no file id`);
+          return null;
+        }
+        return parsed.data;
+      }
       if (res.status === 308) {
         // "Resume Incomplete" — Range: bytes=0-N tells us N bytes are stored.
         const match = res.headers.get("range")?.match(/(\d+)$/);
@@ -591,6 +611,40 @@ export class GdriveBackup {
       throw new Error(`upload "${name}": HTTP ${res.status}`);
     }
     throw new Error(`upload "${name}": did not complete after ${MAX_UPLOAD_ROUNDS} rounds`);
+  }
+
+  /**
+   * Give an app-created file an "anyone with the link can view" reader
+   * permission and return its shareable URL. Only ever called when
+   * backup.gdrive.shareLinks is on — this is the one place the node makes a
+   * clip readable outside the user's own account.
+   *
+   * Allowed under the drive.file scope because the node created the file.
+   * Returns null (with a warning) on any failure rather than throwing: the
+   * backup itself succeeded, and a permanently unshareable file must not wedge
+   * the serial queue behind an endless retry.
+   */
+  private async shareFile(file: DriveFile, name: string): Promise<string | null> {
+    const res = await this.driveFetch(`${this.endpoints.api}/files/${file.id}/permissions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "reader", type: "anyone" }),
+    });
+    if (!res.ok) {
+      this.log.warn(`share link for "${name}": HTTP ${res.status} — clip stays private`);
+      return null;
+    }
+    if (file.webViewLink) return file.webViewLink;
+    // The upload response omitted webViewLink — ask for it explicitly.
+    const metaRes = await this.driveFetch(
+      `${this.endpoints.api}/files/${file.id}?fields=${FILE_FIELDS}`,
+    );
+    if (!metaRes.ok) {
+      this.log.warn(`share link for "${name}": metadata HTTP ${metaRes.status}`);
+      return null;
+    }
+    const parsed = FileResource.safeParse(await metaRes.json().catch(() => null));
+    return parsed.success ? (parsed.data.webViewLink ?? null) : null;
   }
 
   /* ---------- backup worker ---------- */
@@ -643,10 +697,13 @@ export class GdriveBackup {
       return;
     }
     try {
-      await this.backupEvent(job.event_id, job.file);
+      const driveUrl = await this.backupEvent(job.event_id, job.file);
+      if (driveUrl) await this.recordDriveUrl(job.event_id, driveUrl);
       this.deps.db.deleteGdrive(job.id);
       this.releaseClipDir(job.event_id, job.file);
-      this.log.info(`event ${job.event_id} backed up to Google Drive`);
+      this.log.info(
+        `event ${job.event_id} backed up to Google Drive${driveUrl ? " (link shared)" : ""}`,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("HTTP 404")) {
@@ -668,17 +725,48 @@ export class GdriveBackup {
     }
   }
 
-  /** One event: folder chain <folderName>/<camera>/<YYYY-MM-DD>, clip + thumb. */
-  private async backupEvent(eventId: string, dir: string): Promise<void> {
+  /**
+   * Persist a captured Drive URL locally, then try to push it to the cloud.
+   *
+   * Both, because the Supabase upload queue and this one finish in either
+   * order: if event_clips does not exist yet the cloud write is a no-op and
+   * EventPipeline.uploadEvent picks the URL up from SQLite when it creates the
+   * row; if event_clips already exists the cloud write fills it in directly.
+   * A cloud failure is logged, never thrown — the backup itself succeeded.
+   */
+  private async recordDriveUrl(eventId: string, driveUrl: string): Promise<void> {
+    try {
+      this.deps.db.setEventDriveUrl(eventId, driveUrl);
+    } catch (err) {
+      this.log.warn(
+        `storing drive url for event ${eventId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!this.publishDriveUrl) return;
+    try {
+      await this.publishDriveUrl(eventId, driveUrl);
+    } catch (err) {
+      this.log.warn(
+        `publishing drive url for event ${eventId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * One event: folder chain <folderName>/<camera>/<YYYY-MM-DD>, clip + thumb.
+   * Returns the clip's anyone-with-the-link Drive URL when share links are on
+   * and we got one, else null.
+   */
+  private async backupEvent(eventId: string, dir: string): Promise<string | null> {
     const row = this.deps.db.getEvent(eventId);
     if (!row) {
       this.log.warn(`gdrive job for event ${eventId}: event missing locally — skipping`);
-      return;
+      return null;
     }
     const clipPath = path.join(dir, "clip.mp4");
     if (!existsSync(clipPath)) {
       this.log.warn(`gdrive job for event ${eventId}: clip file missing — skipping`);
-      return;
+      return null;
     }
     const config = this.deps.store.get();
     const camera = config.cameras.find((c) => c.id === row.camera_id);
@@ -692,10 +780,14 @@ export class GdriveBackup {
     const dayFolderId = await this.ensureFolder(cameraFolderId, day);
 
     const base = `${time}-${row.kind}`;
-    await this.uploadFile(dayFolderId, `${base}.mp4`, clipPath, "video/mp4");
+    const clipFile = await this.uploadFile(dayFolderId, `${base}.mp4`, clipPath, "video/mp4");
     const thumbPath = path.join(dir, "thumb.jpg");
     if (existsSync(thumbPath)) {
       await this.uploadFile(dayFolderId, `${base}.jpg`, thumbPath, "image/jpeg");
     }
+
+    // Only the clip gets a public link — the thumbnail stays private.
+    if (!config.backup.gdrive.shareLinks || !clipFile) return null;
+    return this.shareFile(clipFile, `${base}.mp4`);
   }
 }

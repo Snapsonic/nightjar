@@ -85,6 +85,9 @@ async function main(): Promise<void> {
     log: log.child("events"),
   });
   pipeline.attach(motion);
+  // Drive backups publish their share URL through the pipeline (which owns the
+  // cloud event_clips writes) — wired here because the pipeline needs gdrive.
+  gdrive.setDriveUrlPublisher((eventId, driveUrl) => pipeline.publishDriveUrl(eventId, driveUrl));
 
   const api = await startApiServer({
     store,

@@ -490,6 +490,11 @@ export class EventPipeline {
             0,
             (Date.parse(row.ended_at ?? row.started_at) - Date.parse(row.started_at)) / 1000,
           );
+    // drive_url is only included when this node has already captured one for
+    // the event (Drive backup with share links finished first). Omitting the
+    // key on conflict leaves any value the Drive queue wrote later intact —
+    // PostgREST upserts only SET the columns present in the payload.
+    const driveUrl = this.deps.db.getEventDriveUrl(eventId);
     const { error: clipRowError } = await client.from("event_clips").upsert(
       {
         event_id: eventId,
@@ -497,6 +502,7 @@ export class EventPipeline {
         bytes: clipBytes,
         duration_s: durationS,
         expires_at: new Date(Date.now() + CLIP_EXPIRY_MS).toISOString(),
+        ...(driveUrl ? { drive_url: driveUrl } : {}),
       },
       { onConflict: "event_id" },
     );
@@ -509,6 +515,23 @@ export class EventPipeline {
       .eq("id", eventId);
     if (statusError) throw new Error(`event status update: ${statusError.message}`);
     this.deps.db.updateEventClipStatus(eventId, "uploaded", thumbUpload.path);
+  }
+
+  /**
+   * Publish a clip's Google Drive share URL to the cloud so the notify
+   * function can point alerts at it. Called by GdriveBackup when its upload
+   * finishes AFTER this pipeline already created the event_clips row; when it
+   * finishes first the row does not exist yet, the update matches nothing, and
+   * uploadEvent folds the URL in from SQLite instead.
+   */
+  async publishDriveUrl(eventId: string, driveUrl: string): Promise<void> {
+    const client = this.deps.link.getClient();
+    if (!client) return; // offline — uploadEvent will carry it when it runs
+    const { error } = await client
+      .from("event_clips")
+      .update({ drive_url: driveUrl })
+      .eq("event_id", eventId);
+    if (error) throw new Error(`event_clips drive_url update: ${error.message}`);
   }
 
   /**

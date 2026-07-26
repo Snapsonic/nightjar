@@ -8,6 +8,7 @@
 //
 // GET ?token=<token> ->
 //   200 {caption, kind, cameraName, startedAt, clipUrl, thumbnailUrl, durationS}
+//   200 {status:"pending", ...} while the clip is still uploading
 //   404 missing / revoked / expired
 //   429 crude abuse guard (view_count > 10000)
 import { adminClient, corsHeaders, json } from "../_shared/util.ts";
@@ -57,13 +58,18 @@ Deno.serve(async (req) => {
     .select("name")
     .eq("id", event.camera_id)
     .maybeSingle();
+  const cameraName = camera?.name ?? "Camera";
 
   const { data: clipRow } = await admin
     .from("event_clips")
     .select("storage_path, duration_s")
     .eq("event_id", event.id)
     .maybeSingle();
-  if (!clipRow) return json({ error: "share not found" }, 404);
+  // Alerts are sent the moment an event closes, so a link tapped immediately
+  // can arrive before the upload lands. That is "not ready yet", not "gone".
+  if (!clipRow) {
+    return json({ status: "pending", kind: event.kind, cameraName, startedAt: event.started_at }, 200);
+  }
 
   // Best-effort view count — a lost race just undercounts.
   await admin
@@ -76,7 +82,9 @@ Deno.serve(async (req) => {
     clipRow.storage_path,
     SIGNED_URL_TTL_SEC,
   );
-  if (clipError || !signedClip) return json({ error: "clip unavailable" }, 404);
+  if (clipError || !signedClip) {
+    return json({ status: "pending", kind: event.kind, cameraName, startedAt: event.started_at }, 200);
+  }
 
   let thumbnailUrl: string | null = null;
   if (event.thumbnail_path) {
@@ -91,7 +99,7 @@ Deno.serve(async (req) => {
   return json({
     caption: share.caption,
     kind: event.kind,
-    cameraName: camera?.name ?? "Camera",
+    cameraName,
     startedAt: event.started_at,
     clipUrl: signedClip.signedUrl,
     thumbnailUrl,

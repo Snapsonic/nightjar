@@ -54,6 +54,8 @@ const AddCameraBody = z
 
 const ToggleBackupBody = z.object({ enabled: z.boolean() });
 
+const ShareLinksBody = z.object({ shareLinks: z.boolean() });
+
 const UpdateZonesBody = z.object({ zones: z.array(Zone).max(MAX_ZONES_PER_CAMERA) });
 
 const NestCredentialsBody = z.object({
@@ -235,6 +237,23 @@ export async function startApiServer(deps: ApiDeps): Promise<FastifyInstance> {
     const backup = deps.store.get().backup;
     deps.store.update({
       backup: { ...backup, gdrive: { ...backup.gdrive, enabled: parsed.data.enabled } },
+    });
+    return deps.gdrive.getStatus();
+  });
+
+  /**
+   * Make backed-up clips link-shareable. Forward-only, like the backup itself:
+   * this only affects clips uploaded from now on — already-backed-up clips
+   * keep whatever permissions they have.
+   */
+  app.post("/api/backup/gdrive/share-links", async (req, reply) => {
+    const parsed = ShareLinksBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "expected { shareLinks: boolean }" });
+    }
+    const backup = deps.store.get().backup;
+    deps.store.update({
+      backup: { ...backup, gdrive: { ...backup.gdrive, shareLinks: parsed.data.shareLinks } },
     });
     return deps.gdrive.getStatus();
   });

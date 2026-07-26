@@ -978,6 +978,29 @@ function renderBackup(backup) {
     });
     toggle.append(checkbox, " Back up new event clips to Drive");
 
+    // Opt-in: makes each newly backed-up clip readable by anyone holding its
+    // Drive URL, so alert texts/emails can link straight at it.
+    const shareToggle = document.createElement("label");
+    shareToggle.className = "backup-toggle";
+    const shareCheckbox = document.createElement("input");
+    shareCheckbox.type = "checkbox";
+    shareCheckbox.checked = !!backup.shareLinks;
+    shareCheckbox.disabled = !backup.enabled;
+    shareCheckbox.addEventListener("change", () => {
+      shareCheckbox.disabled = true;
+      backupAction("/api/backup/gdrive/share-links", { shareLinks: shareCheckbox.checked });
+    });
+    shareToggle.append(
+      shareCheckbox,
+      " Make backed-up clips link-shareable (anyone with the link can view)",
+    );
+
+    const shareNote = document.createElement("p");
+    shareNote.className = "hint";
+    shareNote.textContent = backup.enabled
+      ? "Applies to clips backed up from now on. The link never expires until you remove sharing in Drive."
+      : "Turn on Drive backup first.";
+
     const note = document.createElement("p");
     note.className = "hint";
     note.textContent = "Nightjar can only see files it creates — never the rest of your Drive.";
@@ -997,7 +1020,7 @@ function renderBackup(backup) {
         true,
       ),
     );
-    card.append(rows, toggle, note, row);
+    card.append(rows, toggle, shareToggle, shareNote, note, row);
   }
 }
 
