@@ -26,7 +26,9 @@ export interface ExportResult {
 const SEGMENT_SECONDS = 60;
 const POLL_MS = 2_000;
 const BACKOFF_START_MS = 1_000;
-const BACKOFF_CAP_MS = 60_000;
+// Capped low: Nest/SDM streams expire routinely; long waits turn each
+// expiry into a multi-minute recording gap. Rapid-fail loops still pace at 15s.
+const BACKOFF_CAP_MS = 15_000;
 /** A capture that survives this long resets the restart backoff. */
 const STABLE_MS = 30_000;
 const PRUNE_INTERVAL_MS = 10 * 60_000;

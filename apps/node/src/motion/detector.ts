@@ -24,7 +24,9 @@ const QUIET_MS = 10_000;
 const ALPHA = 0.05;
 
 const BACKOFF_START_MS = 1_000;
-const BACKOFF_CAP_MS = 60_000;
+// Capped low: Nest/SDM streams expire routinely; long waits turn each
+// expiry into a multi-minute recording gap. Rapid-fail loops still pace at 15s.
+const BACKOFF_CAP_MS = 15_000;
 const STABLE_MS = 30_000;
 const KILL_GRACE_MS = 3_000;
 

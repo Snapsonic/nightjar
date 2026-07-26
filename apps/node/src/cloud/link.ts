@@ -320,6 +320,17 @@ export class CloudLink {
     const heartbeatTimer = setInterval(() => void beat(), HEARTBEAT_MS);
     heartbeatTimer.unref();
 
+    // Belt-and-braces: a half-open websocket can leave the channel in a dead
+    // state without ever firing CHANNEL_ERROR/CLOSED — recycle the session if
+    // the channel is no longer joined.
+    const watchdogTimer = setInterval(() => {
+      const state = String(channel.state);
+      if (state !== "joined" && state !== "joining") {
+        endSession(`realtime channel watchdog (state=${state})`);
+      }
+    }, 120_000);
+    watchdogTimer.unref();
+
     const sync = async (): Promise<void> => {
       try {
         await this.syncCameras(client, nodeId);
@@ -354,6 +365,7 @@ export class CloudLink {
     await endedPromise;
 
     clearInterval(heartbeatTimer);
+    clearInterval(watchdogTimer);
     clearInterval(timelineCleanupTimer);
     clearTimeout(refreshTimer);
     unsubscribeConfig();
