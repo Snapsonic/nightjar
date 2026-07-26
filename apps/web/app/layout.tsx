@@ -12,7 +12,13 @@ export const metadata: Metadata = {
     title: "Nightjar",
     statusBarStyle: "black-translucent",
   },
+  // Explicit `icons` metadata suppresses the automatic app/icon.svg link tag,
+  // so the browser favicon must be declared here alongside the apple icon.
   icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icon-192.png", type: "image/png", sizes: "192x192" },
+    ],
     apple: "/icon-192.png",
   },
 };

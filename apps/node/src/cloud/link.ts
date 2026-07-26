@@ -512,21 +512,33 @@ export class CloudLink {
     const nodeId = this.getNodeId();
     if (!client || !nodeId) throw new LinkError("internal", "cloud session not ready");
 
-    let res: Response;
-    try {
-      res = await fetch(
-        `${this.deps.go2rtc.apiUrl()}/api/frame.jpeg?src=${encodeURIComponent(go2rtcStreamName(camera.id))}`,
-      );
-    } catch {
-      throw new LinkError("go2rtc_unreachable", "go2rtc is not responding");
+    // SDM streams churn routinely, so a snapshot request often lands mid
+    // (re)start — retry inside the node (the browser waits 30s anyway) rather
+    // than surfacing every warm-up as an error tile.
+    const frameUrl = `${this.deps.go2rtc.apiUrl()}/api/frame.jpeg?src=${encodeURIComponent(go2rtcStreamName(camera.id))}`;
+    let bytes: ArrayBuffer | null = null;
+    let lastFailure = "snapshot unavailable";
+    for (let attempt = 0; attempt < 4 && bytes === null; attempt++) {
+      if (attempt > 0) await this.sleep(4_000);
+      let res: Response;
+      try {
+        res = await fetch(frameUrl);
+      } catch {
+        throw new LinkError("go2rtc_unreachable", "go2rtc is not responding");
+      }
+      if (!res.ok) {
+        lastFailure = `snapshot returned HTTP ${res.status}`;
+        continue;
+      }
+      const body = await res.arrayBuffer();
+      if (body.byteLength === 0) {
+        // go2rtc can 200 with an empty body while a stream is starting.
+        lastFailure = "snapshot was empty (stream starting?)";
+        continue;
+      }
+      bytes = body;
     }
-    if (!res.ok) throw new LinkError("camera_offline", `snapshot returned HTTP ${res.status}`);
-    const bytes = await res.arrayBuffer();
-    // go2rtc can 200 with an empty body while a stream is (re)starting; a
-    // zero-byte upload renders as a broken image on every dashboard tile.
-    if (bytes.byteLength === 0) {
-      throw new LinkError("camera_offline", "snapshot was empty (stream starting?)");
-    }
+    if (bytes === null) throw new LinkError("camera_offline", lastFailure);
 
     const storagePath = `${nodeId}/snap-${message.cameraId}-${Date.now()}.jpg`;
     const { error: uploadError } = await client.storage
