@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -251,6 +251,66 @@ export class EventPipeline {
     }
   }
 
+  /**
+   * delogo filter for a camera's watermark box, sized against the clip's real
+   * dimensions. Returns null when the camera has no box or the probe fails —
+   * a missing filter is always better than a failed export.
+   */
+  private async buildDelogoFilter(cameraId: string, clipPath: string): Promise<string | null> {
+    const box = this.deps.store.get().cameras.find((c) => c.id === cameraId)?.hideWatermark;
+    if (!box) return null;
+    try {
+      const { stdout } = await execFileAsync(
+        "ffprobe",
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", clipPath],
+        { timeout: 15_000, maxBuffer: 1024 * 1024 },
+      );
+      const [w, h] = stdout.trim().split(",").map(Number);
+      if (!w || !h) return null;
+      // delogo needs integers and at least a 1px margin inside the frame.
+      const x = Math.max(1, Math.round(box.x * w));
+      const y = Math.max(1, Math.round(box.y * h));
+      const bw = Math.max(2, Math.min(Math.round(box.w * w), w - x - 1));
+      const bh = Math.max(2, Math.min(Math.round(box.h * h), h - y - 1));
+      return `delogo=x=${x}:y=${y}:w=${bw}:h=${bh}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Re-encode the clip with the watermark blanked. Only shared artefacts pay
+   * this cost; if anything fails the original clip is kept as-is.
+   */
+  private async stripWatermark(cameraId: string, clipPath: string): Promise<void> {
+    const filter = await this.buildDelogoFilter(cameraId, clipPath);
+    if (!filter) return;
+    const tmp = `${clipPath}.clean.mp4`;
+    try {
+      // prettier-ignore
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-nostdin", "-loglevel", "error", "-y",
+          "-i", clipPath,
+          "-vf", filter,
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+          "-c:a", "copy", "-movflags", "+faststart",
+          tmp,
+        ],
+        { timeout: 180_000, maxBuffer: 1024 * 1024 },
+      );
+      renameSync(tmp, clipPath);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      this.deps.log.warn(
+        `watermark strip failed for camera ${cameraId} — keeping the original clip: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /* ---------- event close: clip + thumbnail + row + queue ---------- */
 
   private clipDir(eventId: string): string {
@@ -269,6 +329,7 @@ export class EventPipeline {
     try {
       mkdirSync(dir, { recursive: true });
       await this.deps.recorder.exportRange(candidate.cameraId, clipStartMs, clipEndMs, clipPath);
+      await this.stripWatermark(candidate.cameraId, clipPath);
       await this.extractThumbnail(clipPath, thumbPath);
       hasClip = true;
     } catch (err) {

@@ -16,6 +16,7 @@ export const CameraCapabilities = z.object({
    *  TODO: auto-detect ONVIF backchannel support instead of relying on the
    *  user-set flag. */
   talkback: z.enum(["none", "backchannel"]).default("none"),
+
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   fps: z.number().positive().optional(),
@@ -74,6 +75,20 @@ const CameraConfigBase = z.object({
   rtspSubUrl: z.string().url().optional(),
   /** Required when source is "nest". */
   nest: NestCameraSource.optional(),
+  /** Blank a burned-in vendor watermark (Nest brands its SDM streams) on
+   *  shared artefacts — event clips and thumbnails. Fractions of the frame so
+   *  the box follows a resolution change. 24/7 recordings are never touched:
+   *  they are stream-copied, and re-encoding them would cost CPU and quality.
+   *  Live view still shows it — filtering there would mean transcoding per
+   *  viewer. */
+  hideWatermark: z
+    .object({
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      w: z.number().min(0).max(1),
+      h: z.number().min(0).max(1),
+    })
+    .optional(),
   enabled: z.boolean().default(true),
   record: z.boolean().default(true),
   detect: z.boolean().default(true),

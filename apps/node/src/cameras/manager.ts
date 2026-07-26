@@ -8,6 +8,11 @@ import type { Logger } from "../log.js";
 
 const execFileAsync = promisify(execFile);
 
+/** Google composites a "Nest" wordmark into the top-right of SDM streams.
+ *  Measured on a 1920x1080 frame (x 1755-1885, y 50-95) and stored as
+ *  fractions with a little margin. */
+const NEST_WATERMARK_BOX = { x: 0.906, y: 0.030, w: 0.086, h: 0.076 };
+
 const FfprobeStream = z.object({
   codec_type: z.string().optional(),
   codec_name: z.string().optional(),
@@ -121,6 +126,7 @@ export class CameraManager {
       source,
       rtspUrl: source === "rtsp" ? input.rtspUrl : undefined,
       rtspSubUrl: source === "rtsp" ? input.rtspSubUrl : undefined,
+      hideWatermark: source === "nest" ? NEST_WATERMARK_BOX : undefined,
       nest:
         source === "nest"
           ? { deviceId: input.nestDeviceId as string, protocols: input.nestProtocols ?? [] }
