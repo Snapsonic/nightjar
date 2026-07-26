@@ -11,7 +11,8 @@
 // share-view (service role), so expiry/revocation/counting stay server-side.
 import { adminClient, callerClient, handleOptions, json } from "../_shared/util.ts";
 
-const SHARE_BASE_URL = "https://nightjar.ca/s/";
+// The app serves /s/<token>; nightjar.ca 307s here for older links.
+const SHARE_BASE_URL = "https://app.nightjar.ca/s/";
 const ALLOWED_EXPIRY_DAYS = [1, 7, 30];
 const DEFAULT_EXPIRY_DAYS = 7;
 const MAX_CAPTION_LENGTH = 500;

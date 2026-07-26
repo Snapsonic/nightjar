@@ -91,7 +91,8 @@ export interface ClipLink {
   expiresAt: string | null;
 }
 
-export const SHARE_BASE_URL = "https://nightjar.ca/s/";
+// The app serves /s/<token>; nightjar.ca 307s here for older links.
+export const SHARE_BASE_URL = "https://app.nightjar.ca/s/";
 export const EVENTS_URL = "https://app.nightjar.ca/events";
 export const SHARE_EXPIRY_DAYS = 7;
 /**
@@ -331,7 +332,7 @@ export function buildEmailText(
  * name truncated so the whole message stays <= 160 chars.
  *
  * The clip link replaces the app.nightjar.ca/events tail:
- *   "Nightjar: Person at Backyard, 14:32 - https://nightjar.ca/s/<token>"
+ *   "Nightjar: Person at Backyard, 14:32 - https://app.nightjar.ca/s/<token>"
  * base64url share tokens (A-Za-z0-9-_) and Drive URLs are all inside the
  * GSM-7 basic alphabet, so the single-segment budget still holds. A link long
  * enough to squeeze the camera name below MIN_SMS_CAMERA_CHARS is dropped in
