@@ -14,3 +14,13 @@ verify_jwt = false
 # root so this file is picked up (or pass --no-verify-jwt explicitly).
 [functions.share-view]
 verify_jwt = false
+
+# storage-gc is poked hourly by the nightjar-storage-gc pg_cron job via pg_net
+# with the x-nightjar-hook shared secret (private.app_config
+# storage_gc_hook_secret) and no Authorization header, so JWT verification is
+# off — same arrangement as notify. It deletes storage objects, so it stays in
+# dry-run mode until STORAGE_GC_DRY_RUN is explicitly set to false.
+# Orchestrator: deploy with `supabase functions deploy storage-gc` from repo
+# root so this file is picked up (or pass --no-verify-jwt explicitly).
+[functions.storage-gc]
+verify_jwt = false

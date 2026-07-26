@@ -9,5 +9,5 @@
     </g>
     <circle cx="44" cy="22" r="2.1" fill="#f0a441"/>
   </g>
-  <text x="162" y="92" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="60" font-weight="600" letter-spacing="-1" fill="#16181f">Nightjar</text>
+  <text x="162" y="92" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="60" font-weight="600" letter-spacing="-1" fill="#16181f">nightjar<tspan fill="#f0a441">.</tspan></text>
 </svg>

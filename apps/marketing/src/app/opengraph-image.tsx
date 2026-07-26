@@ -39,8 +39,8 @@ export default function OpengraphImage() {
             </g>
             <circle cx="44" cy="22" r="2.1" fill="#f0a441" />
           </svg>
-          <div style={{ fontSize: 54, fontWeight: 600, letterSpacing: -1.5 }}>
-            Nightjar
+          <div style={{ fontSize: 54, fontWeight: 600, letterSpacing: -1.5, display: "flex" }}>
+            nightjar<span style={{ color: "#f0a441" }}>.</span>
           </div>
         </div>
 

@@ -161,6 +161,25 @@ describe("event_clips drive_url", () => {
     }
   });
 
+  it("never sends expires_at — the database owns cloud retention", async () => {
+    const fx = makePipeline();
+    try {
+      await uploadEvent(fx.pipeline, EVENT_ID, fx.dir);
+      const payload = fx.captured.clipUpserts[0];
+      assert.ok(payload, "one event_clips upsert");
+      // Migration 0014 derives expires_at from the owner's plan in a BEFORE
+      // trigger and revokes the node's grant on the column: sending it would
+      // be both pointless and a hard 42501 on the upsert.
+      assert.ok(
+        !("expires_at" in payload),
+        `expires_at must be absent, got ${JSON.stringify(payload)}`,
+      );
+    } finally {
+      fx.db.close();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
   it("publishDriveUrl updates the existing event_clips row", async () => {
     const fx = makePipeline();
     try {

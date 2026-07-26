@@ -50,7 +50,11 @@ const UPLOAD_BACKOFF_BASE_MS = 5_000;
 const UPLOAD_BACKOFF_CAP_MS = 300_000;
 /** Serial queue: a permanently failing job must not block everything behind it. */
 const UPLOAD_MAX_ATTEMPTS = 50;
-const CLIP_EXPIRY_MS = 3 * 86_400_000;
+// Cloud clip retention is NOT the node's business any more. event_clips.
+// expires_at is derived server-side from the owner's plan by the
+// event_clips_set_expiry trigger (migration 0014_storage_gc), which
+// overwrites anything a client sends — and the node no longer holds an
+// INSERT/UPDATE grant on that column. Sending it would only fail the upsert.
 
 interface OpenEvent {
   id: string;
@@ -562,7 +566,6 @@ export class EventPipeline {
         storage_path: clipUpload.path,
         bytes: clipBytes,
         duration_s: durationS,
-        expires_at: new Date(Date.now() + CLIP_EXPIRY_MS).toISOString(),
         ...(driveUrl ? { drive_url: driveUrl } : {}),
       },
       { onConflict: "event_id" },
