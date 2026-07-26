@@ -111,3 +111,7 @@ Each camera has three flags you can set in configuration (see the [configuration
 | `enabled` | `true` | Master switch — disables streaming, recording, and detection |
 | `record` | `true` | 24/7 recording to disk |
 | `detect` | `true` | Motion detection (and therefore AI events) |
+
+<Warning>
+**Google rate-limits SDM stream creation.** Every time a bridged Nest stream (re)connects, Google issues a fresh stream — and throttles these requests per minute. Nightjar's node retries patiently (backing off to 5 minutes) specifically to stay under this quota; a crash-loop or aggressive restart schedule can lock **all** your Nest cameras out with `429 Too Many Requests` until the quota window clears. If every Nest camera goes dark at once with 429s in the go2rtc log, stop retrying and wait a few minutes — and check your [SDM API quotas](https://console.cloud.google.com/apis/api/smartdevicemanagement.googleapis.com/quotas) if it persists.
+</Warning>
