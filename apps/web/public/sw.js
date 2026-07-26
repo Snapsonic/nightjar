@@ -45,8 +45,22 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = (event.notification.data && event.notification.data.url) || "/events";
 
+  // Clip links live on nightjar.ca / drive.google.com — a different origin
+  // than the app, so an existing app window cannot navigate() there. Open a
+  // new window for those instead of silently focusing the wrong page.
+  let sameOrigin = true;
+  try {
+    sameOrigin = new URL(url, self.location.origin).origin === self.location.origin;
+  } catch {
+    // Unparseable URL — treat as a same-origin path and let openWindow decide.
+  }
+
   event.waitUntil(
     (async () => {
+      if (!sameOrigin) {
+        await self.clients.openWindow(url);
+        return;
+      }
       const windows = await self.clients.matchAll({
         type: "window",
         includeUncontrolled: true,

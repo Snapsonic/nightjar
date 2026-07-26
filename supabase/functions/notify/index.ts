@@ -18,6 +18,11 @@
 // Channels run under Promise.allSettled — a failure in one never blocks the
 // others — and each channel that sends records its own
 // notification_deliveries row (channel column).
+//
+// Every alert also tries to carry a tappable clip link (see resolveClipLink):
+// the owner's own Google Drive URL when they opted into that, otherwise a
+// short-lived Nightjar share (clip_shares, 7 days, revocable), otherwise the
+// plain /events page as before.
 import * as webpush from "jsr:@negrel/webpush@0.5.0";
 import { adminClient, json } from "../_shared/util.ts";
 
@@ -75,6 +80,57 @@ export function channelEnabled(
   return value === true;
 }
 
+/* ---------- clip links (pure parts) ---------- */
+
+export type LinkSource = "nightjar" | "drive";
+
+export interface ClipLink {
+  url: string;
+  source: LinkSource;
+  /** ISO expiry — Nightjar shares only; Drive links do not expire. */
+  expiresAt: string | null;
+}
+
+export const SHARE_BASE_URL = "https://nightjar.ca/s/";
+export const EVENTS_URL = "https://app.nightjar.ca/events";
+export const SHARE_EXPIRY_DAYS = 7;
+/**
+ * clip_status values worth minting a link for. "uploading" counts on purpose:
+ * the events_notify trigger fires on INSERT, and the node inserts the event
+ * row with clip_status 'uploading' *before* it pushes the bytes — so at alert
+ * time the clip is normally still in flight and would otherwise never get a
+ * link. share-view 404s until the upload finishes (seconds), and the share is
+ * revocable if it never does.
+ */
+export const LINKABLE_CLIP_STATUSES = ["uploaded", "uploading"];
+/** Below this the camera name is unreadable — drop the link instead. */
+const MIN_SMS_CAMERA_CHARS = 6;
+
+/** clip_links is opt-OUT: missing/invalid reads as true. */
+export function clipLinksEnabled(settings: NotifySettings | null): boolean {
+  return settings?.channels?.clip_links !== false;
+}
+
+/** link_source defaults to "nightjar"; anything unrecognised reads as that. */
+export function linkSource(settings: NotifySettings | null): LinkSource {
+  return settings?.channels?.link_source === "drive" ? "drive" : "nightjar";
+}
+
+/** Whole days left on the link, rounded up and floored at 1. */
+export function daysUntil(expiresAt: string, now: Date): number {
+  const ms = new Date(expiresAt).getTime() - now.getTime();
+  return Math.max(1, Math.ceil(ms / 86_400_000));
+}
+
+/** The muted line under the email CTA. Null when there is no link. */
+export function buildLinkNote(link: ClipLink | null, now: Date): string | null {
+  if (!link) return null;
+  if (link.source === "drive") return "Google Drive link";
+  if (!link.expiresAt) return "Link expires";
+  const days = daysUntil(link.expiresAt, now);
+  return `Link expires in ${days} day${days === 1 ? "" : "s"}`;
+}
+
 /* ---------- VAPID key handling ---------- */
 
 function base64UrlToBytes(value: string): Uint8Array {
@@ -120,6 +176,8 @@ interface EventRow {
   camera_id: string;
   kind: string;
   started_at: string;
+  /** Present in the trigger payload (to_jsonb(new)); re-read before use. */
+  clip_status?: string;
 }
 
 function isEventRow(value: unknown): value is EventRow {
@@ -142,7 +200,11 @@ function utcHhMm(iso: string): string {
 /** External send timeout — never let a slow provider hold the function open. */
 const SEND_TIMEOUT_MS = 5_000;
 
-export function buildPayload(event: EventRow, cameraName: string): string {
+export function buildPayload(
+  event: EventRow,
+  cameraName: string,
+  link: ClipLink | null = null,
+): string {
   const startedAt = new Date(event.started_at);
   return JSON.stringify({
     title: `${capitalize(event.kind)} — ${cameraName}`,
@@ -150,7 +212,9 @@ export function buildPayload(event: EventRow, cameraName: string): string {
     // The service worker reformats the body in device-local time from this.
     timestamp: startedAt.getTime(),
     tag: `nightjar-${event.camera_id}`,
-    url: "/events",
+    // Absolute when we have a clip link (nightjar.ca / drive.google.com are a
+    // different origin than the app) — the service worker openWindow()s it.
+    url: link?.url ?? "/events",
   });
 }
 
@@ -172,12 +236,32 @@ function escapeHtml(value: string): string {
  * theme and are forced inline, so the card reads the same in Gmail light and
  * dark modes.
  */
-export function buildEmailHtml(kind: string, cameraName: string, startedAtIso: string): string {
+export function buildEmailHtml(
+  kind: string,
+  cameraName: string,
+  startedAtIso: string,
+  link: ClipLink | null = null,
+  now: Date = new Date(),
+): string {
   const kindLabel = escapeHtml(capitalize(kind));
   const camera = escapeHtml(cameraName);
   const time = utcHhMm(startedAtIso);
+  // The amber CTA becomes "Watch clip" whenever we have a link, with a muted
+  // line under it saying what kind of link it is; otherwise it stays the
+  // original "View events" button and there is no note.
+  const ctaHref = escapeHtml(link?.url ?? EVENTS_URL);
+  const ctaLabel = link ? "Watch clip" : "View events";
+  const note = buildLinkNote(link, now);
   const font =
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  const noteRow = note
+    ? `
+              <tr>
+                <td style="padding:10px 2px 0 2px;font-family:${font};font-size:12px;line-height:1.5;color:#5b6375;">
+                  ${escapeHtml(note)}
+                </td>
+              </tr>`
+    : "";
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0;padding:0;background-color:#0a0c13;">
   <tr>
     <td align="center" style="padding:32px 16px;">
@@ -203,9 +287,9 @@ export function buildEmailHtml(kind: string, cameraName: string, startedAtIso: s
             <table role="presentation" cellpadding="0" cellspacing="0" border="0">
               <tr>
                 <td align="center" style="border-radius:10px;background-color:#f0a441;">
-                  <a href="https://app.nightjar.ca/events" target="_blank" style="display:inline-block;padding:12px 28px;font-family:${font};font-size:14px;font-weight:700;color:#0a0c13;text-decoration:none;border-radius:10px;">View events</a>
+                  <a href="${ctaHref}" target="_blank" style="display:inline-block;padding:12px 28px;font-family:${font};font-size:14px;font-weight:700;color:#0a0c13;text-decoration:none;border-radius:10px;">${ctaLabel}</a>
                 </td>
-              </tr>
+              </tr>${noteRow}
             </table>
           </td>
         </tr>
@@ -221,11 +305,19 @@ export function buildEmailHtml(kind: string, cameraName: string, startedAtIso: s
 </table>`;
 }
 
-export function buildEmailText(kind: string, cameraName: string, startedAtIso: string): string {
+export function buildEmailText(
+  kind: string,
+  cameraName: string,
+  startedAtIso: string,
+  link: ClipLink | null = null,
+  now: Date = new Date(),
+): string {
+  const note = buildLinkNote(link, now);
   return [
     `${capitalize(kind)} detected at ${cameraName} - ${utcHhMm(startedAtIso)} UTC.`,
     "",
-    "View events: https://app.nightjar.ca/events",
+    link ? `Watch clip: ${link.url}` : `View events: ${EVENTS_URL}`,
+    ...(note ? [note] : []),
     "",
     `You're getting this because ${kind} alerts are on. Manage at https://app.nightjar.ca/settings`,
   ].join("\n");
@@ -237,18 +329,134 @@ export function buildEmailText(kind: string, cameraName: string, startedAtIso: s
  * Single-segment, GSM-7-safe SMS: no emoji, plain hyphen instead of an em
  * dash (both would force UCS-2 and shrink the segment to 70 chars); camera
  * name truncated so the whole message stays <= 160 chars.
+ *
+ * The clip link replaces the app.nightjar.ca/events tail:
+ *   "Nightjar: Person at Backyard, 14:32 - https://nightjar.ca/s/<token>"
+ * base64url share tokens (A-Za-z0-9-_) and Drive URLs are all inside the
+ * GSM-7 basic alphabet, so the single-segment budget still holds. A link long
+ * enough to squeeze the camera name below MIN_SMS_CAMERA_CHARS is dropped in
+ * favour of the events page rather than sent as a multi-segment message.
  */
-export function buildSmsMessage(kind: string, cameraName: string, startedAtIso: string): string {
+export function buildSmsMessage(
+  kind: string,
+  cameraName: string,
+  startedAtIso: string,
+  link: ClipLink | null = null,
+): string {
   const prefix = `Nightjar: ${capitalize(kind)} at `;
-  const suffix = `, ${utcHhMm(startedAtIso)} - app.nightjar.ca/events`;
-  const room = 160 - prefix.length - suffix.length;
+  const time = utcHhMm(startedAtIso);
+  const fallbackSuffix = `, ${time} - app.nightjar.ca/events`;
+  let suffix = link ? `, ${time} - ${link.url}` : fallbackSuffix;
+  if (160 - prefix.length - suffix.length < MIN_SMS_CAMERA_CHARS) suffix = fallbackSuffix;
+  const room = Math.max(0, 160 - prefix.length - suffix.length);
   const name = cameraName.length > room ? cameraName.slice(0, room) : cameraName;
   return `${prefix}${name}${suffix}`;
 }
 
-/* ---------- per-channel senders ---------- */
+/* ---------- clip link resolution ---------- */
 
 type Admin = ReturnType<typeof adminClient>;
+
+/** 24 random bytes, base64url — same shape as share-clip's tokens. */
+function generateShareToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/**
+ * The link this alert should carry, in preference order:
+ *   1. link_source === "drive" AND event_clips.drive_url present -> that URL.
+ *      (The user opted into their own storage; the node writes drive_url when
+ *      backup.gdrive.shareLinks is on.)
+ *   2. clip_links on AND the clip is uploaded/uploading -> a Nightjar share.
+ *      An existing unexpired, unrevoked share for the event is REUSED so a
+ *      retry does not litter clip_shares with tokens; otherwise a fresh
+ *      7-day, caption-less row is inserted here with the service role. We do
+ *      NOT call the share-clip function: it authenticates a human JWT, which
+ *      this service-to-service path does not have.
+ *   3. otherwise null -> callers fall back to the /events page as before.
+ *
+ * Never throws: a link is a nice-to-have, and losing it must not lose the
+ * alert.
+ */
+export async function resolveClipLink(
+  admin: Admin,
+  event: EventRow,
+  ownerId: string,
+  settings: NotifySettings | null,
+  now: Date,
+): Promise<ClipLink | null> {
+  if (!clipLinksEnabled(settings)) return null;
+  try {
+    // clip_status is re-read rather than trusted from the trigger payload:
+    // pg_net delivers asynchronously, so the upload may already have landed.
+    const [freshEvent, clipRow] = await Promise.all([
+      admin.from("events").select("clip_status").eq("id", event.id).maybeSingle(),
+      admin.from("event_clips").select("drive_url").eq("event_id", event.id).maybeSingle(),
+    ]);
+    const clipStatus = freshEvent.data?.clip_status ?? event.clip_status ?? null;
+
+    if (linkSource(settings) === "drive") {
+      const driveUrl = clipRow.data?.drive_url ?? null;
+      if (typeof driveUrl === "string" && driveUrl !== "") {
+        return { url: driveUrl, source: "drive", expiresAt: null };
+      }
+      // Drive preferred but this clip has no Drive copy (backup off, still
+      // queued, or share links not enabled) — fall through to a Nightjar
+      // share rather than dropping the link entirely.
+    }
+
+    if (clipStatus === null || !LINKABLE_CLIP_STATUSES.includes(clipStatus)) return null;
+
+    const { data: existing } = await admin
+      .from("clip_shares")
+      .select("token, expires_at")
+      .eq("event_id", event.id)
+      .eq("owner_id", ownerId)
+      .is("revoked_at", null)
+      .gt("expires_at", now.toISOString())
+      .order("expires_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (existing?.token) {
+      return {
+        url: `${SHARE_BASE_URL}${existing.token}`,
+        source: "nightjar",
+        expiresAt: existing.expires_at,
+      };
+    }
+
+    const expiresAt = new Date(now.getTime() + SHARE_EXPIRY_DAYS * 86_400_000).toISOString();
+    const { data: minted, error } = await admin
+      .from("clip_shares")
+      .insert({
+        token: generateShareToken(),
+        event_id: event.id,
+        owner_id: ownerId,
+        caption: null,
+        expires_at: expiresAt,
+      })
+      .select("token, expires_at")
+      .single();
+    if (error || !minted) {
+      console.error("clip share mint failed:", error?.message ?? "no row returned");
+      return null;
+    }
+    return {
+      url: `${SHARE_BASE_URL}${minted.token}`,
+      source: "nightjar",
+      expiresAt: minted.expires_at,
+    };
+  } catch (err) {
+    console.error("clip link resolution failed:", err);
+    return null;
+  }
+}
+
+/* ---------- per-channel senders ---------- */
 
 interface PushOutcome {
   status: "sent" | "skipped" | "failed";
@@ -289,6 +497,7 @@ async function sendPush(
   ownerId: string,
   event: EventRow,
   cameraName: string,
+  link: ClipLink | null,
 ): Promise<PushOutcome> {
   const { data: subs } = await admin
     .from("push_subscriptions")
@@ -298,7 +507,7 @@ async function sendPush(
     return { status: "skipped", detail: "no subscriptions", sent: 0, failed: 0, removed: 0 };
   }
 
-  const payload = buildPayload(event, cameraName);
+  const payload = buildPayload(event, cameraName, link);
   const appServer = await getAppServer();
   const results = await Promise.allSettled(
     subs.map(async (sub) => {
@@ -362,6 +571,7 @@ async function sendEmail(
   notifyEmail: string | null,
   event: EventRow,
   cameraName: string,
+  link: ClipLink | null,
 ): Promise<SendOutcome> {
   const apiKey = Deno.env.get("POSTMARK_API_KEY");
   const from = Deno.env.get("NIGHTJAR_EMAIL_FROM");
@@ -388,8 +598,8 @@ async function sendEmail(
       From: from,
       To: to,
       Subject: `🌙 ${capitalize(event.kind)} — ${cameraName}`,
-      HtmlBody: buildEmailHtml(event.kind, cameraName, event.started_at),
-      TextBody: buildEmailText(event.kind, cameraName, event.started_at),
+      HtmlBody: buildEmailHtml(event.kind, cameraName, event.started_at, link),
+      TextBody: buildEmailText(event.kind, cameraName, event.started_at, link),
       MessageStream: "outbound",
     }),
     signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
@@ -406,6 +616,7 @@ async function sendSms(
   notifyPhone: string,
   event: EventRow,
   cameraName: string,
+  link: ClipLink | null,
 ): Promise<SendOutcome> {
   const apiKey = Deno.env.get("MAGPIPE_API_KEY");
   const from = Deno.env.get("MAGPIPE_SMS_FROM");
@@ -421,7 +632,7 @@ async function sendSms(
     body: JSON.stringify({
       serviceNumber: from,
       contactPhone: notifyPhone,
-      message: buildSmsMessage(event.kind, cameraName, event.started_at),
+      message: buildSmsMessage(event.kind, cameraName, event.started_at, link),
     }),
     signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   });
@@ -496,11 +707,12 @@ Deno.serve(async (req) => {
     .limit(1)
     .maybeSingle();
 
+  const now = new Date();
   const decision = decideNotify({
     kind: event.kind,
     settings,
     lastDeliveryAt: lastDelivery?.sent_at ?? null,
-    now: new Date(),
+    now,
   });
   if (!decision.send) return json({ skipped: decision.reason });
 
@@ -529,16 +741,21 @@ Deno.serve(async (req) => {
     notifyPhone = profile?.notify_phone ?? null;
   }
 
+  // One link per alert moment, shared by every channel — so the SMS, the
+  // email CTA and the push all open the same clip, and we mint at most one
+  // share per event no matter how many channels fire.
+  const link = await resolveClipLink(admin, event, ownerId, settings, now);
+
   // Fan out. Each entry resolves to a labeled outcome; log-and-continue on
   // failure — one broken provider must not block the other channels.
   const tasks: { channel: "push" | "email" | "sms"; run: () => Promise<PushOutcome | SendOutcome> }[] = [];
   if (wantPush) {
-    tasks.push({ channel: "push", run: () => sendPush(admin, ownerId, event, cameraName) });
+    tasks.push({ channel: "push", run: () => sendPush(admin, ownerId, event, cameraName, link) });
   }
   if (wantEmail) {
     tasks.push({
       channel: "email",
-      run: () => sendEmail(admin, ownerId, notifyEmail, event, cameraName),
+      run: () => sendEmail(admin, ownerId, notifyEmail, event, cameraName, link),
     });
   }
   if (wantSms) {
@@ -546,7 +763,7 @@ Deno.serve(async (req) => {
       channel: "sms",
       run: () =>
         notifyPhone
-          ? sendSms(notifyPhone, event, cameraName)
+          ? sendSms(notifyPhone, event, cameraName, link)
           : Promise.resolve<SendOutcome>({ status: "skipped", detail: "no phone number" }),
     });
   }
@@ -582,5 +799,5 @@ Deno.serve(async (req) => {
     );
   }
 
-  return json({ delivered: deliveredChannels, outcomes });
+  return json({ delivered: deliveredChannels, outcomes, link: link?.source ?? null });
 });

@@ -137,6 +137,28 @@ export class NodeDb {
       `);
       this.db.pragma("user_version = 2");
     }
+    if (version < 3) {
+      // Anyone-with-the-link Drive URL for the backed-up clip, captured by
+      // the gdrive uploader. Kept locally as well as pushed to the cloud so
+      // the two queues can finish in either order: whichever runs last fills
+      // event_clips.drive_url in (see EventPipeline.uploadEvent).
+      this.db.exec(`ALTER TABLE events ADD COLUMN drive_url TEXT;`);
+      this.db.pragma("user_version = 3");
+    }
+  }
+
+  /** Remember the Drive share URL captured for an event's clip. */
+  setEventDriveUrl(eventId: string, driveUrl: string): void {
+    this.write(() =>
+      this.db.prepare("UPDATE events SET drive_url = ? WHERE id = ?").run(driveUrl, eventId),
+    );
+  }
+
+  getEventDriveUrl(eventId: string): string | null {
+    const row = this.db.prepare("SELECT drive_url FROM events WHERE id = ?").get(eventId) as
+      | { drive_url: string | null }
+      | undefined;
+    return row?.drive_url ?? null;
   }
 
   insertSegment(cameraId: string, filePath: string, startedAtMs: number): number {

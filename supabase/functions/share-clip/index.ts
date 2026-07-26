@@ -70,12 +70,25 @@ Deno.serve(async (req) => {
   const action = body?.action;
   const admin = adminClient();
 
+  // Account-level kill switch + default expiry. Checked here, not just in the
+  // UI, so disabling sharing actually prevents new links from existing.
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("sharing_enabled, default_share_expiry_days")
+    .eq("id", userId)
+    .maybeSingle();
+  const sharingEnabled = profile?.sharing_enabled !== false;
+  const accountDefaultDays = profile?.default_share_expiry_days ?? DEFAULT_EXPIRY_DAYS;
+
   if (action === "create") {
+    if (!sharingEnabled) {
+      return json({ error: "clip sharing is turned off for this account" }, 403);
+    }
     const { eventId, expiresInDays, caption } = body;
     if (typeof eventId !== "string" || eventId === "") {
       return json({ error: "eventId required" }, 400);
     }
-    const days = expiresInDays === undefined ? DEFAULT_EXPIRY_DAYS : expiresInDays;
+    const days = expiresInDays === undefined ? accountDefaultDays : expiresInDays;
     if (!ALLOWED_EXPIRY_DAYS.includes(days)) {
       return json({ error: "expiresInDays must be 1, 7 or 30" }, 400);
     }
@@ -124,6 +137,31 @@ Deno.serve(async (req) => {
       .is("revoked_at", null);
     if (error) return json({ error: error.message }, 500);
     return json({ revoked: true });
+  }
+
+  if (action === "revoke_all") {
+    const { error, count } = await admin
+      .from("clip_shares")
+      .update({ revoked_at: new Date().toISOString() }, { count: "exact" })
+      .eq("owner_id", userId)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString());
+    if (error) return json({ error: error.message }, 500);
+    return json({ revoked: count ?? 0 });
+  }
+
+  if (action === "status") {
+    const { count } = await admin
+      .from("clip_shares")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_id", userId)
+      .is("revoked_at", null)
+      .gt("expires_at", new Date().toISOString());
+    return json({
+      sharingEnabled,
+      defaultExpiryDays: accountDefaultDays,
+      activeShares: count ?? 0,
+    });
   }
 
   if (action === "list") {

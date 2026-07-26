@@ -8,6 +8,7 @@ import {
   SignOutButton,
 } from "@/components/settings-forms";
 import { PushNotificationsCard } from "@/components/push-settings";
+import { SharingSettings } from "@/components/sharing-settings";
 import { createClient } from "@/lib/supabase/server";
 import { parseChannels, toPlan } from "@/lib/utils";
 
@@ -22,10 +23,11 @@ export default async function SettingsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [profileRes, subscriptionRes, notificationRes, pushCountRes] = await Promise.all([
+  const [profileRes, subscriptionRes, notificationRes, pushCountRes, driveClipRes] =
+    await Promise.all([
     supabase
       .from("profiles")
-      .select("display_name, notify_email, notify_phone")
+      .select("display_name, notify_email, notify_phone, sharing_enabled, default_share_expiry_days")
       .eq("id", user.id)
       .maybeSingle(),
     supabase.from("subscriptions").select("plan, status").eq("owner_id", user.id).maybeSingle(),
@@ -35,11 +37,20 @@ export default async function SettingsPage() {
       .eq("user_id", user.id)
       .is("camera_id", null)
       .maybeSingle(),
-    supabase
-      .from("push_subscriptions")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", user.id),
-  ]);
+      supabase
+        .from("push_subscriptions")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", user.id),
+      // Does this user have ANY Drive-backed clip? RLS ("owner reads clips")
+      // already scopes event_clips to their own nodes, so existence is enough
+      // to decide whether the Drive link option is selectable. A failure here
+      // is not fatal — the option just stays disabled.
+      supabase
+        .from("event_clips")
+        .select("event_id", { count: "exact", head: true })
+        .not("drive_url", "is", null)
+        .limit(1),
+    ]);
 
   const firstError = profileRes.error ?? subscriptionRes.error ?? notificationRes.error;
   if (firstError) {
@@ -62,6 +73,21 @@ export default async function SettingsPage() {
             <DisplayNameForm
               userId={user.id}
               initialDisplayName={profileRes.data?.display_name ?? ""}
+            />
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-night-600 bg-night-850 p-6">
+          <h2 className="text-sm font-semibold text-fog-100">Clip sharing</h2>
+          <p className="mt-1 text-xs leading-relaxed text-fog-500">
+            Share links let anyone with the URL watch a single clip until the link
+            expires or you revoke it. Nothing is public unless you create a link.
+          </p>
+          <div className="mt-4">
+            <SharingSettings
+              userId={user.id}
+              initialEnabled={profileRes.data?.sharing_enabled ?? true}
+              initialExpiryDays={profileRes.data?.default_share_expiry_days ?? 7}
             />
           </div>
         </section>
@@ -92,6 +118,7 @@ export default async function SettingsPage() {
               initialNotifyEmail={profileRes.data?.notify_email ?? ""}
               initialNotifyPhone={profileRes.data?.notify_phone ?? ""}
               accountEmail={user.email ?? ""}
+              hasDriveClips={(driveClipRes.count ?? 0) > 0}
             />
           </div>
         </section>

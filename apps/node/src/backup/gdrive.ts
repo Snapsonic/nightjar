@@ -74,11 +74,16 @@ const RefreshGrant = z.object({
   expires_in: z.number(),
 });
 
+/** The subset of a Drive File we ask for and keep. */
+const FileResource = z.object({ id: z.string(), webViewLink: z.string().optional() });
+export type DriveFile = z.infer<typeof FileResource>;
+
 const FileList = z.object({
-  files: z.array(z.object({ id: z.string() })).default([]),
+  files: z.array(FileResource).default([]),
 });
 
-const FileResource = z.object({ id: z.string() });
+/** Fields requested on every upload/lookup that may feed a share link. */
+const FILE_FIELDS = "id,webViewLink";
 
 const AboutResponse = z.object({
   user: z.object({ emailAddress: z.string().optional() }).optional(),
@@ -100,6 +105,14 @@ export type GdriveStatus =
     }
   | { status: "error"; message: string };
 
+/**
+ * Pushes a clip's Drive share URL to the cloud (event_clips.drive_url) so the
+ * notify function can link alerts at it. Injected rather than reaching for
+ * the CloudLink directly: the cloud write already lives on EventPipeline, and
+ * the seam keeps this module free of Supabase types (and easy to test).
+ */
+export type DriveUrlPublisher = (eventId: string, driveUrl: string) => Promise<void>;
+
 export interface GdriveBackupDeps {
   db: NodeDb;
   store: ConfigStore;
@@ -108,6 +121,8 @@ export interface GdriveBackupDeps {
   endpoints?: GdriveEndpoints;
   /** Test override for the token-file directory; defaults to configDir(). */
   dir?: string;
+  /** Optional; also settable later via setDriveUrlPublisher(). */
+  publishDriveUrl?: DriveUrlPublisher;
 }
 
 interface AboutCache {
@@ -166,12 +181,19 @@ export class GdriveBackup {
   /** parentId/name -> folderId; write-through to the gdrive_folders table. */
   private readonly folderCache = new Map<string, string>();
   private readonly log: Logger;
+  private publishDriveUrl: DriveUrlPublisher | null;
 
   constructor(private readonly deps: GdriveBackupDeps) {
     this.log = deps.log;
     this.endpoints = deps.endpoints ?? GOOGLE_ENDPOINTS;
     this.tokenPath = path.join(deps.dir ?? configDir(), "gdrive-token.json");
     this.token = this.loadToken();
+    this.publishDriveUrl = deps.publishDriveUrl ?? null;
+  }
+
+  /** Wired by main.ts once the EventPipeline (which owns cloud writes) exists. */
+  setDriveUrlPublisher(publish: DriveUrlPublisher): void {
+    this.publishDriveUrl = publish;
   }
 
   /* ---------- lifecycle ---------- */

@@ -22,15 +22,31 @@ export function toPlan(plan: string): "free" | "plus" | "pro" {
 /* Notification channel prefs, mirrored by the notify edge function.
  * A type alias (not an interface) so it stays assignable to the Json column
  * type via the implicit index signature. */
-export type ChannelPrefs = { push: boolean; email: boolean; sms: boolean };
+export type LinkSource = "nightjar" | "drive";
+export type ChannelPrefs = {
+  push: boolean;
+  email: boolean;
+  sms: boolean;
+  /** Include a tappable clip link in alerts. Opt-OUT: default on. */
+  clip_links: boolean;
+  /** Which link: an expiring Nightjar share, or the user's own Drive URL. */
+  link_source: LinkSource;
+};
 
-/** channels jsonb -> booleans; missing keys are off, except push (default on). */
+/**
+ * channels jsonb -> prefs. Missing keys are off, except push and clip_links
+ * (default on) and link_source (defaults to "nightjar"). Kept byte-for-byte
+ * in step with clipLinksEnabled()/linkSource()/channelEnabled() in the notify
+ * edge function — rows written before 0012 have neither clip-link key.
+ */
 export function parseChannels(value: unknown): ChannelPrefs {
   const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
   return {
     push: raw.push !== false,
     email: raw.email === true,
     sms: raw.sms === true,
+    clip_links: raw.clip_links !== false,
+    link_source: raw.link_source === "drive" ? "drive" : "nightjar",
   };
 }
 

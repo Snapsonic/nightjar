@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { EventKind } from "@nightjar/shared";
 import { getBrowserClient } from "@/lib/supabase/client";
-import { parseChannels, type ChannelPrefs } from "@/lib/utils";
+import { parseChannels, type ChannelPrefs, type LinkSource } from "@/lib/utils";
 
 /* ---------- display name ---------- */
 
@@ -238,22 +238,47 @@ function ChannelSwitch({
   );
 }
 
+const LINK_SOURCE_OPTIONS: {
+  value: LinkSource;
+  label: string;
+  hint: string;
+  unavailableHint: string;
+}[] = [
+  {
+    value: "nightjar",
+    label: "Nightjar link",
+    hint: "Expires in 7 days, and you can revoke it any time from the event.",
+    unavailableHint: "Expires in 7 days, and you can revoke it any time from the event.",
+    },
+  {
+    value: "drive",
+    label: "Google Drive link",
+    hint: "Uses your own Drive copy. Anyone with the link can view it, and it does not expire.",
+    unavailableHint:
+      "Needs Google Drive backup with link sharing turned on in your node's settings — no Drive-backed clips yet.",
+  },
+];
+
 export function NotificationChannels({
   userId,
   initialChannels,
   initialNotifyEmail,
   initialNotifyPhone,
   accountEmail,
+  hasDriveClips,
 }: {
   userId: string;
   initialChannels: ChannelPrefs;
   initialNotifyEmail: string;
   initialNotifyPhone: string;
   accountEmail: string;
+  /** True when any of this user's clips already has a Drive share URL. */
+  hasDriveClips: boolean;
 }) {
   const [channels, setChannels] = useState<ChannelPrefs>(initialChannels);
   const [busyChannel, setBusyChannel] = useState<"email" | "sms" | null>(null);
   const [channelError, setChannelError] = useState<string | null>(null);
+  const [linkBusy, setLinkBusy] = useState(false);
 
   const [email, setEmail] = useState(initialNotifyEmail);
   const [emailBusy, setEmailBusy] = useState(false);
@@ -265,6 +290,33 @@ export function NotificationChannels({
   const [phoneBusy, setPhoneBusy] = useState(false);
   const [phoneSaved, setPhoneSaved] = useState(false);
   const [phoneError, setPhoneError] = useState<string | null>(null);
+
+  /**
+   * Merge a patch into the global (camera_id null) settings row's channels
+   * jsonb. That row's uniqueness is enforced by a NULL-safe expression index
+   * which PostgREST upserts can't target — so select-then-write, and re-read
+   * the stored jsonb first so we never clobber keys we aren't changing.
+   */
+  async function writeChannels(patch: Partial<ChannelPrefs>): Promise<string | null> {
+    const supabase = getBrowserClient();
+    const { data: existing, error: selectErr } = await supabase
+      .from("notification_settings")
+      .select("id, channels")
+      .eq("user_id", userId)
+      .is("camera_id", null)
+      .maybeSingle();
+    if (selectErr) return selectErr.message;
+    const merged: ChannelPrefs = { ...parseChannels(existing?.channels), ...patch };
+    const { error: err } = existing
+      ? await supabase
+          .from("notification_settings")
+          .update({ channels: merged })
+          .eq("id", existing.id)
+      : await supabase
+          .from("notification_settings")
+          .insert({ user_id: userId, camera_id: null, channels: merged });
+    return err ? err.message : null;
+  }
 
   async function toggleChannel(channel: "email" | "sms") {
     const next = { ...channels, [channel]: !channels[channel] };
@@ -278,34 +330,26 @@ export function NotificationChannels({
     setBusyChannel(channel);
     setChannelError(null);
 
-    // camera_id null = the global settings row; its uniqueness is enforced by
-    // a NULL-safe expression index that PostgREST upserts can't target — so
-    // select-then-write, merging into the existing channels jsonb.
-    const supabase = getBrowserClient();
-    const { data: existing, error: selectErr } = await supabase
-      .from("notification_settings")
-      .select("id, channels")
-      .eq("user_id", userId)
-      .is("camera_id", null)
-      .maybeSingle();
-    const merged: ChannelPrefs = {
-      ...parseChannels(existing?.channels),
-      [channel]: next[channel],
-    };
-    const { error: err } = selectErr
-      ? { error: selectErr }
-      : existing
-        ? await supabase
-            .from("notification_settings")
-            .update({ channels: merged })
-            .eq("id", existing.id)
-        : await supabase
-            .from("notification_settings")
-            .insert({ user_id: userId, camera_id: null, channels: merged });
+    const message = await writeChannels({ [channel]: next[channel] });
     setBusyChannel(null);
-    if (err) {
+    if (message) {
       setChannels(previous); // roll back optimistic update
-      setChannelError(`Could not save: ${err.message}`);
+      setChannelError(`Could not save: ${message}`);
+    }
+  }
+
+  /** Clip-link prefs: the on/off switch and the Nightjar-vs-Drive choice. */
+  async function saveLinkPrefs(patch: Partial<ChannelPrefs>) {
+    const previous = channels;
+    setChannels({ ...channels, ...patch });
+    setLinkBusy(true);
+    setChannelError(null);
+
+    const message = await writeChannels(patch);
+    setLinkBusy(false);
+    if (message) {
+      setChannels(previous);
+      setChannelError(`Could not save: ${message}`);
     }
   }
 
@@ -457,6 +501,61 @@ export function NotificationChannels({
             </p>
           )}
         </form>
+      </div>
+
+      {/* Clip links: what the alert actually points at. */}
+      <div className={rowClass}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm text-fog-200">Include clip links in alerts</p>
+            <p className="mt-0.5 text-xs text-fog-500">
+              Texts and emails link straight to the clip instead of the events page.
+            </p>
+          </div>
+          <ChannelSwitch
+            on={channels.clip_links}
+            disabled={linkBusy}
+            label="Include clip links in alerts"
+            onToggle={() => void saveLinkPrefs({ clip_links: !channels.clip_links })}
+          />
+        </div>
+
+        {channels.clip_links && (
+          <fieldset className="mt-3 space-y-2" disabled={linkBusy}>
+            <legend className="sr-only">Which link to send</legend>
+            {LINK_SOURCE_OPTIONS.map((option) => {
+              // The Drive option needs a Drive-backed clip to point at — the
+              // node only writes drive_url when Drive backup AND its
+              // link-sharing checkbox are both on.
+              const unavailable = option.value === "drive" && !hasDriveClips;
+              const selected = channels.link_source === option.value;
+              return (
+                <label
+                  key={option.value}
+                  className={`flex gap-2.5 rounded-lg border px-3 py-2.5 ${
+                    selected ? "border-ember-500/50 bg-ember-500/5" : "border-night-600 bg-night-850"
+                  } ${unavailable ? "opacity-60" : "cursor-pointer"}`}
+                >
+                  <input
+                    type="radio"
+                    name="link-source"
+                    value={option.value}
+                    checked={selected}
+                    disabled={unavailable}
+                    onChange={() => void saveLinkPrefs({ link_source: option.value })}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-ember-500"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm text-fog-200">{option.label}</span>
+                    <span className="mt-0.5 block text-xs leading-relaxed text-fog-500">
+                      {unavailable ? option.unavailableHint : option.hint}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </fieldset>
+        )}
       </div>
 
       {channelError && (

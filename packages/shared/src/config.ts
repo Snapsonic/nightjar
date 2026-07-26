@@ -26,6 +26,13 @@ export const BackupConfig = z.object({
       folderName: z.string().min(1).max(80).default("Nightjar"),
       clientId: z.string().optional(),
       clientSecret: z.string().optional(),
+      /**
+       * Opt-in: give every backed-up clip an "anyone with the link" reader
+       * permission and publish the resulting Drive URL to the cloud
+       * (event_clips.drive_url) so alerts can link to it. Off by default —
+       * turning it on makes those clips readable by anyone who has the URL.
+       */
+      shareLinks: z.boolean().default(false),
     })
     .default({}),
 });

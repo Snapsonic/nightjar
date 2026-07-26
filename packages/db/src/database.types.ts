@@ -113,6 +113,7 @@ export type Database = {
         Row: {
           bytes: number | null
           created_at: string
+          drive_url: string | null
           duration_s: number | null
           event_id: string
           expires_at: string | null
@@ -122,6 +123,7 @@ export type Database = {
         Insert: {
           bytes?: number | null
           created_at?: string
+          drive_url?: string | null
           duration_s?: number | null
           event_id: string
           expires_at?: string | null
@@ -131,6 +133,7 @@ export type Database = {
         Update: {
           bytes?: number | null
           created_at?: string
+          drive_url?: string | null
           duration_s?: number | null
           event_id?: string
           expires_at?: string | null
@@ -337,6 +340,8 @@ export type Database = {
       }
       profiles: {
         Row: {
+          sharing_enabled: boolean
+          default_share_expiry_days: number
           created_at: string
           display_name: string | null
           id: string
@@ -344,6 +349,8 @@ export type Database = {
           notify_phone: string | null
         }
         Insert: {
+          sharing_enabled?: boolean
+          default_share_expiry_days?: number
           created_at?: string
           display_name?: string | null
           id: string
@@ -351,6 +358,8 @@ export type Database = {
           notify_phone?: string | null
         }
         Update: {
+          sharing_enabled?: boolean
+          default_share_expiry_days?: number
           created_at?: string
           display_name?: string | null
           id?: string

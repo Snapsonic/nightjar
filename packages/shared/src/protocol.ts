@@ -240,3 +240,11 @@ export const DEFAULT_STUN_SERVERS = [
   "stun:stun.l.google.com:19302",
   "stun:stun.cloudflare.com:3478",
 ];
+
+/** share-clip {action:"status"} / {action:"revoke_all"} response. */
+export const ShareStatusResponse = z.object({
+  sharingEnabled: z.boolean().default(true),
+  defaultExpiryDays: z.number().int().default(7),
+  activeShares: z.number().int().default(0),
+  revoked: z.number().int().optional(),
+});
