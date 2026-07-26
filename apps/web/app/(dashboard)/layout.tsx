@@ -1,3 +1,4 @@
+import { TimezoneSync } from "@/components/timezone-sync";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import { Sidebar } from "@/components/sidebar";
@@ -11,8 +12,15 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   if (!user) redirect("/login");
 
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("timezone")
+    .eq("id", user.id)
+    .maybeSingle();
+
   return (
     <div className="min-h-dvh">
+      <TimezoneSync userId={user.id} current={profile?.timezone ?? null} />
       <Sidebar />
       <main className="min-h-dvh px-4 pt-6 pb-24 sm:px-6 md:pt-8 md:pb-10 md:pl-[17rem] lg:pr-10 lg:pl-[17.5rem]">
         <div className="mx-auto w-full max-w-6xl">{children}</div>

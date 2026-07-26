@@ -340,6 +340,7 @@ export type Database = {
       }
       profiles: {
         Row: {
+          timezone: string | null
           sharing_enabled: boolean
           default_share_expiry_days: number
           created_at: string
@@ -349,6 +350,7 @@ export type Database = {
           notify_phone: string | null
         }
         Insert: {
+          timezone?: string | null
           sharing_enabled?: boolean
           default_share_expiry_days?: number
           created_at?: string
@@ -358,6 +360,7 @@ export type Database = {
           notify_phone?: string | null
         }
         Update: {
+          timezone?: string | null
           sharing_enabled?: boolean
           default_share_expiry_days?: number
           created_at?: string

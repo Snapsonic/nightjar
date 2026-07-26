@@ -179,6 +179,7 @@ interface EventRow {
   started_at: string;
   /** Present in the trigger payload (to_jsonb(new)); re-read before use. */
   clip_status?: string;
+  score?: number;
 }
 
 function isEventRow(value: unknown): value is EventRow {
@@ -190,6 +191,28 @@ function isEventRow(value: unknown): value is EventRow {
 }
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * Event time in the recipient's own zone. Falls back to UTC (clearly labelled)
+ * when we have not learned their timezone yet — an unlabelled wrong time is
+ * worse than a labelled inconvenient one.
+ */
+export function formatLocalTime(iso: string, timeZone: string | null): string {
+  const d = new Date(iso);
+  if (timeZone) {
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        weekday: "short",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(d);
+    } catch {
+      // invalid zone string — fall through to UTC
+    }
+  }
+  return `${utcHhMm(iso)} UTC`;
+}
 
 function utcHhMm(iso: string): string {
   const d = new Date(iso);
@@ -237,16 +260,30 @@ function escapeHtml(value: string): string {
  * theme and are forced inline, so the card reads the same in Gmail light and
  * dark modes.
  */
+export interface EmailExtras {
+  /** Signed thumbnail URL — the hero image. Clients that block images still
+   *  get a complete, readable email. */
+  thumbnailUrl?: string | null;
+  /** Detection confidence 0..1, shown as a percentage when present. */
+  score?: number | null;
+  timeZone?: string | null;
+}
+
 export function buildEmailHtml(
   kind: string,
   cameraName: string,
   startedAtIso: string,
   link: ClipLink | null = null,
   now: Date = new Date(),
+  extras: EmailExtras = {},
 ): string {
   const kindLabel = escapeHtml(capitalize(kind));
   const camera = escapeHtml(cameraName);
-  const time = utcHhMm(startedAtIso);
+  const time = escapeHtml(formatLocalTime(startedAtIso, extras.timeZone ?? null));
+  const confidence =
+    typeof extras.score === "number" && extras.score > 0
+      ? `${Math.round(extras.score * 100)}% confidence`
+      : null;
   // The amber CTA becomes "Watch clip" whenever we have a link, with a muted
   // line under it saying what kind of link it is; otherwise it stays the
   // original "View events" button and there is no note.
@@ -255,6 +292,20 @@ export function buildEmailHtml(
   const note = buildLinkNote(link, now);
   const font =
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  // Hero: the thumbnail, wrapped in the same link as the CTA so tapping the
+  // picture does the obvious thing. Omitted entirely when there is no clip.
+  const heroRow = extras.thumbnailUrl
+    ? `
+        <tr>
+          <td style="padding:22px 20px 0 20px;">
+            <a href="${escapeHtml(link?.url ?? EVENTS_URL)}" target="_blank" style="text-decoration:none;">
+              <img src="${escapeHtml(extras.thumbnailUrl)}" width="440" alt="${kindLabel} at ${camera}"
+                style="display:block;width:100%;max-width:440px;height:auto;border-radius:12px;border:1px solid #232a3b;" />
+            </a>
+          </td>
+        </tr>`
+    : "";
+  const metaLine = confidence ? `at ${camera} &middot; ${time} &middot; ${escapeHtml(confidence)}` : `at ${camera} &middot; ${time}`;
   const noteRow = note
     ? `
               <tr>
@@ -269,18 +320,18 @@ export function buildEmailHtml(
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="480" style="width:100%;max-width:480px;background-color:#131722;border:1px solid #232a3b;border-radius:16px;">
         <tr>
           <td style="padding:28px 32px 0 32px;font-family:${font};">
-            <span style="font-size:18px;line-height:1;color:#f0a441;vertical-align:middle;">&#9790;</span>
-            <span style="font-size:16px;font-weight:600;letter-spacing:0.02em;color:#e8eaf0;vertical-align:middle;">&nbsp;nightjar.</span>
+            <span style="font-size:16px;font-weight:600;letter-spacing:0.02em;color:#e8eaf0;">nightjar<span style="color:#f0a441;">.</span></span>
           </td>
         </tr>
+        ${heroRow}
         <tr>
-          <td style="padding:28px 32px 6px 32px;font-family:${font};font-size:26px;line-height:1.25;font-weight:700;color:#ffffff;">
+          <td style="padding:22px 32px 6px 32px;font-family:${font};font-size:26px;line-height:1.25;font-weight:700;color:#ffffff;">
             ${kindLabel} detected
           </td>
         </tr>
         <tr>
           <td style="padding:0 32px;font-family:${font};font-size:14px;line-height:1.5;color:#8b93a7;">
-            at ${camera} &middot; ${time} UTC
+            ${metaLine}
           </td>
         </tr>
         <tr>
@@ -311,11 +362,12 @@ export function buildEmailText(
   cameraName: string,
   startedAtIso: string,
   link: ClipLink | null = null,
+  timeZone: string | null = null,
   now: Date = new Date(),
 ): string {
   const note = buildLinkNote(link, now);
   return [
-    `${capitalize(kind)} detected at ${cameraName} - ${utcHhMm(startedAtIso)} UTC.`,
+    `${capitalize(kind)} detected at ${cameraName} - ${formatLocalTime(startedAtIso, timeZone)}.`,
     "",
     link ? `Watch clip: ${link.url}` : `View events: ${EVENTS_URL}`,
     ...(note ? [note] : []),
@@ -345,7 +397,7 @@ export function buildSmsMessage(
   link: ClipLink | null = null,
 ): string {
   const prefix = `Nightjar: ${capitalize(kind)} at `;
-  const time = utcHhMm(startedAtIso);
+  const time = utcHhMm(startedAtIso);  // SMS stays compact; GSM-7 budget is tight
   const fallbackSuffix = `, ${time} - app.nightjar.ca/events`;
   let suffix = link ? `, ${time} - ${link.url}` : fallbackSuffix;
   if (160 - prefix.length - suffix.length < MIN_SMS_CAMERA_CHARS) suffix = fallbackSuffix;
@@ -573,6 +625,7 @@ async function sendEmail(
   event: EventRow,
   cameraName: string,
   link: ClipLink | null,
+  timeZone: string | null = null,
 ): Promise<SendOutcome> {
   const apiKey = Deno.env.get("POSTMARK_API_KEY");
   const from = Deno.env.get("NIGHTJAR_EMAIL_FROM");
@@ -587,6 +640,25 @@ async function sendEmail(
   }
   if (!to) return { status: "skipped", detail: "no email address" };
 
+  // Hero image: a signed thumbnail URL. Mail clients proxy and cache the image
+  // at delivery, so the short TTL is fine; a failure here just drops the image.
+  let thumbnailUrl: string | null = null;
+  try {
+    const { data: clip } = await admin
+      .from("events")
+      .select("thumbnail_path")
+      .eq("id", event.id)
+      .maybeSingle();
+    if (clip?.thumbnail_path) {
+      const { data: signed } = await admin.storage
+        .from("event-clips")
+        .createSignedUrl(clip.thumbnail_path, 60 * 60 * 24 * 7);
+      thumbnailUrl = signed?.signedUrl ?? null;
+    }
+  } catch {
+    // image is a nicety, not a requirement
+  }
+
   const base = Deno.env.get("POSTMARK_API_BASE") ?? "https://api.postmarkapp.com";
   const res = await fetch(`${base}/email`, {
     method: "POST",
@@ -599,8 +671,12 @@ async function sendEmail(
       From: from,
       To: to,
       Subject: `🌙 ${capitalize(event.kind)} — ${cameraName}`,
-      HtmlBody: buildEmailHtml(event.kind, cameraName, event.started_at, link),
-      TextBody: buildEmailText(event.kind, cameraName, event.started_at, link),
+      HtmlBody: buildEmailHtml(event.kind, cameraName, event.started_at, link, new Date(), {
+        thumbnailUrl,
+        score: typeof event.score === "number" ? event.score : null,
+        timeZone,
+      }),
+      TextBody: buildEmailText(event.kind, cameraName, event.started_at, link, timeZone),
       MessageStream: "outbound",
     }),
     signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
@@ -732,14 +808,16 @@ Deno.serve(async (req) => {
   // Delivery addresses, only when a non-push channel needs them.
   let notifyEmail: string | null = null;
   let notifyPhone: string | null = null;
+  let timeZone: string | null = null;
   if (wantEmail || wantSms) {
     const { data: profile } = await admin
       .from("profiles")
-      .select("notify_email, notify_phone")
+      .select("notify_email, notify_phone, timezone")
       .eq("id", ownerId)
       .maybeSingle();
     notifyEmail = profile?.notify_email ?? null;
     notifyPhone = profile?.notify_phone ?? null;
+    timeZone = profile?.timezone ?? null;
   }
 
   // One link per alert moment, shared by every channel — so the SMS, the
@@ -756,7 +834,7 @@ Deno.serve(async (req) => {
   if (wantEmail) {
     tasks.push({
       channel: "email",
-      run: () => sendEmail(admin, ownerId, notifyEmail, event, cameraName, link),
+      run: () => sendEmail(admin, ownerId, notifyEmail, event, cameraName, link, timeZone),
     });
   }
   if (wantSms) {

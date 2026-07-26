@@ -256,12 +256,17 @@ select cron.schedule(
 
 -- PostgreSQL has no way to subtract one column from a table-level grant, so
 -- the table-level INSERT/UPDATE is dropped and re-granted column by column.
--- Every column the node actually writes is listed; expires_at and id are
--- deliberately absent (id has a default, and the node never sets it).
+-- Every column the node actually writes is listed. Three are deliberately
+-- absent:
+--   * expires_at — the whole point of this section.
+--   * created_at — it ANCHORS expires_at, so a client that could set it could
+--     set the expiry by proxy (created_at = year 3000). The column defaults to
+--     now() and the node never sends it.
+--   * id — defaulted, never sent.
 -- SELECT/DELETE are untouched, and RLS still applies on top of all of this.
 revoke insert, update on public.event_clips from authenticated, anon;
 
-grant insert (event_id, storage_path, bytes, duration_s, drive_url, created_at)
+grant insert (event_id, storage_path, bytes, duration_s, drive_url)
   on public.event_clips to authenticated;
 grant update (event_id, storage_path, bytes, duration_s, drive_url)
   on public.event_clips to authenticated;
@@ -269,7 +274,7 @@ grant update (event_id, storage_path, bytes, duration_s, drive_url)
 -- anon has no RLS policy on event_clips and never writes it; it keeps the
 -- same column list purely so the two client roles stay symmetric and a future
 -- policy change does not silently depend on a missing grant.
-grant insert (event_id, storage_path, bytes, duration_s, drive_url, created_at)
+grant insert (event_id, storage_path, bytes, duration_s, drive_url)
   on public.event_clips to anon;
 grant update (event_id, storage_path, bytes, duration_s, drive_url)
   on public.event_clips to anon;
