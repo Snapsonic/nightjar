@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const EventKind = z.enum(["motion", "person", "vehicle", "animal", "package"]);
+export const EventKind = z.enum(["motion", "person", "vehicle", "animal", "package", "bear"]);
 export type EventKind = z.infer<typeof EventKind>;
 
 export const ClipStatus = z.enum(["local", "uploading", "uploaded", "expired"]);

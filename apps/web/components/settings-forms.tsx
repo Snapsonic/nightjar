@@ -112,6 +112,7 @@ const KIND_LABELS: Record<EventKind, string> = {
   vehicle: "Vehicle",
   animal: "Animal",
   package: "Package",
+  bear: "Bear",
 };
 
 export function NotificationToggles({

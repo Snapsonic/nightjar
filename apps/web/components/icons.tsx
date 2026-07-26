@@ -116,12 +116,26 @@ function PackageIcon({ className }: IconProps) {
   );
 }
 
+function BearIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...stroke}>
+      <circle cx="6.5" cy="7" r="2.2" />
+      <circle cx="17.5" cy="7" r="2.2" />
+      <path d="M12 5.2 c4.2 0 6.8 2.9 6.8 6.6 0 4 -3 7 -6.8 7 s-6.8 -3 -6.8 -7 c0 -3.7 2.6 -6.6 6.8 -6.6 Z" />
+      <circle cx="9.5" cy="11.5" r="0.6" />
+      <circle cx="14.5" cy="11.5" r="0.6" />
+      <path d="M10.8 15 a1.6 1.2 0 0 0 2.4 0" />
+    </svg>
+  );
+}
+
 const KIND_ICONS: Record<EventKind, (props: IconProps) => ReactElement> = {
   motion: MotionIcon,
   person: PersonIcon,
   vehicle: VehicleIcon,
   animal: AnimalIcon,
   package: PackageIcon,
+  bear: BearIcon,
 };
 
 export function KindIcon({ kind, className }: { kind: EventKind; className?: string }) {

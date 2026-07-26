@@ -34,7 +34,8 @@ const MIN_DETECTION_SCORE = 0.5;
 const REDETECT_DELAY_MS = 10_000;
 /** Event kind upgrade priority — higher wins regardless of score. */
 const KIND_PRIORITY: Record<EventKind, number> = {
-  person: 4,
+  person: 5,
+  bear: 4,
   package: 3,
   vehicle: 2,
   animal: 1,
@@ -47,6 +48,8 @@ const MAX_QUEUED_UPLOADS = 500;
 const UPLOAD_IDLE_MS = 10_000;
 const UPLOAD_BACKOFF_BASE_MS = 5_000;
 const UPLOAD_BACKOFF_CAP_MS = 300_000;
+/** Serial queue: a permanently failing job must not block everything behind it. */
+const UPLOAD_MAX_ATTEMPTS = 50;
 const CLIP_EXPIRY_MS = 3 * 86_400_000;
 
 interface OpenEvent {
@@ -386,6 +389,20 @@ export class EventPipeline {
         this.deps.log.info(`event ${job.event_id} uploaded`);
       } catch (err) {
         this.deps.db.bumpUploadAttempts(job.id);
+        // Dead-letter poisoned jobs: the queue is serial, so one job that can
+        // never succeed blocks every event behind it forever.
+        if (job.attempts + 1 >= UPLOAD_MAX_ATTEMPTS) {
+          this.deps.log.error(
+            `upload of event ${job.event_id} abandoned after ${job.attempts + 1} attempts: ` +
+              `${err instanceof Error ? err.message : String(err)} — clip stays local`,
+          );
+          this.deps.db.updateEventClipStatus(job.event_id, "local");
+          this.deps.db.deleteUpload(job.id);
+          if (!this.deps.db.clipReferenced(job.event_id)) {
+            rmSync(job.file, { recursive: true, force: true });
+          }
+          continue;
+        }
         const backoff = Math.min(
           UPLOAD_BACKOFF_BASE_MS * 2 ** Math.min(job.attempts, 10),
           UPLOAD_BACKOFF_CAP_MS,

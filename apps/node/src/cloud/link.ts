@@ -522,6 +522,11 @@ export class CloudLink {
     }
     if (!res.ok) throw new LinkError("camera_offline", `snapshot returned HTTP ${res.status}`);
     const bytes = await res.arrayBuffer();
+    // go2rtc can 200 with an empty body while a stream is (re)starting; a
+    // zero-byte upload renders as a broken image on every dashboard tile.
+    if (bytes.byteLength === 0) {
+      throw new LinkError("camera_offline", "snapshot was empty (stream starting?)");
+    }
 
     const storagePath = `${nodeId}/snap-${message.cameraId}-${Date.now()}.jpg`;
     const { error: uploadError } = await client.storage

@@ -31,6 +31,10 @@ Deno.serve(async (req) => {
   const uploads = [];
   for (const file of files as string[]) {
     const path = `${nodeId}/${eventId}/${file}`;
+    // Idempotent retries: a crashed upload can leave the object behind, and
+    // createSignedUploadUrl refuses existing paths ("resource already
+    // exists") — which wedges the node's serial queue forever.
+    await admin.storage.from("event-clips").remove([path]);
     const { data, error } = await admin.storage.from("event-clips").createSignedUploadUrl(path);
     if (error) return json({ error: error.message }, 500);
     uploads.push({ file, path, token: data.token });
