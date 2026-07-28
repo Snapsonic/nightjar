@@ -214,6 +214,31 @@ export function formatLocalTime(iso: string, timeZone: string | null): string {
   return `${utcHhMm(iso)} UTC`;
 }
 
+/**
+ * Compact hh:mm in the recipient's zone, for SMS.
+ *
+ * formatLocalTime's weekday + 12-hour rendering is too expensive for a
+ * single-segment SMS, but sending UTC is worse than verbose: an alert reading
+ * "04:35" for something that happened at 21:35 local reads as a stale alert
+ * about the middle of the night. 24-hour en-GB gives a zero-padded hh:mm.
+ * Without a known zone we say UTC out loud rather than imply local time.
+ */
+function compactLocalHhMm(iso: string, timeZone: string | null): string {
+  if (timeZone) {
+    try {
+      return new Intl.DateTimeFormat("en-GB", {
+        timeZone,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(new Date(iso));
+    } catch {
+      // invalid zone string — fall through to labelled UTC
+    }
+  }
+  return `${utcHhMm(iso)} UTC`;
+}
+
 function utcHhMm(iso: string): string {
   const d = new Date(iso);
   const hh = String(d.getUTCHours()).padStart(2, "0");
@@ -379,25 +404,64 @@ export function buildEmailText(
 /* ---------- sms (Magpipe) ---------- */
 
 /**
+ * Whether alert SMS may contain a URL.
+ *
+ * Off by default, and that is not a style choice. Carriers spam-filter
+ * link-bearing SMS from unregistered long codes, and they do it silently: the
+ * send returns 200, the message is accepted, and the delivery receipt comes
+ * back "undelivered" with error 30007. Confirmed by A/B test on the live
+ * sender, seconds apart to the same handset — the message carrying an
+ * app.nightjar.ca link was filtered, the identical message without one was
+ * delivered. Every linked alert was being dropped while both our logs and the
+ * deliveries table said "sent".
+ *
+ * Note this is not the US A2P 10DLC regime, which Canadian carriers do not
+ * use. Rogers/Bell/Telus filter unregistered A2P traffic on their own, and
+ * Canadian long codes bought on or after 2025-03-26 additionally need A2P
+ * registration or Persona verification even for Canada-only sending. Our
+ * sender was bought well after that date, so it is unregistered either way.
+ *
+ * Dropping the link costs a tap-through and makes the alert actually arrive,
+ * which is the whole point of an alert. Set SMS_INCLUDE_LINK=true to restore
+ * links once the sender is registered/verified (or moved to a toll-free
+ * number, which is exempt from the long-code rules).
+ */
+function smsLinksAllowed(): boolean {
+  return (Deno.env.get("SMS_INCLUDE_LINK") ?? "").toLowerCase() === "true";
+}
+
+/**
  * Single-segment, GSM-7-safe SMS: no emoji, plain hyphen instead of an em
  * dash (both would force UCS-2 and shrink the segment to 70 chars); camera
  * name truncated so the whole message stays <= 160 chars.
  *
- * The clip link replaces the app.nightjar.ca/events tail:
+ * With links enabled the clip link replaces the tail:
  *   "Nightjar: Person at Backyard, 14:32 - https://app.nightjar.ca/s/<token>"
  * base64url share tokens (A-Za-z0-9-_) and Drive URLs are all inside the
  * GSM-7 basic alphabet, so the single-segment budget still holds. A link long
  * enough to squeeze the camera name below MIN_SMS_CAMERA_CHARS is dropped in
  * favour of the events page rather than sent as a multi-segment message.
+ *
+ * With links disabled (the default — see smsLinksAllowed) the message carries
+ * no URL at all, not even a bare domain: carrier filters match on the domain,
+ * not the scheme, so "app.nightjar.ca/events" trips 30007 just as readily as
+ * the full https:// form.
  */
 export function buildSmsMessage(
   kind: string,
   cameraName: string,
   startedAtIso: string,
   link: ClipLink | null = null,
+  allowLinks: boolean = smsLinksAllowed(),
+  timeZone: string | null = null,
 ): string {
   const prefix = `Nightjar: ${capitalize(kind)} at `;
-  const time = utcHhMm(startedAtIso);  // SMS stays compact; GSM-7 budget is tight
+  const time = compactLocalHhMm(startedAtIso, timeZone);
+  if (!allowLinks) {
+    const suffix = ` at ${time}`;
+    const room = Math.max(0, 160 - prefix.length - suffix.length);
+    return `${prefix}${cameraName.slice(0, room)}${suffix}`;
+  }
   const fallbackSuffix = `, ${time} - app.nightjar.ca/events`;
   let suffix = link ? `, ${time} - ${link.url}` : fallbackSuffix;
   if (160 - prefix.length - suffix.length < MIN_SMS_CAMERA_CHARS) suffix = fallbackSuffix;
@@ -694,6 +758,7 @@ async function sendSms(
   event: EventRow,
   cameraName: string,
   link: ClipLink | null,
+  timeZone: string | null = null,
 ): Promise<SendOutcome> {
   const apiKey = Deno.env.get("MAGPIPE_API_KEY");
   const from = Deno.env.get("MAGPIPE_SMS_FROM");
@@ -709,7 +774,14 @@ async function sendSms(
     body: JSON.stringify({
       serviceNumber: from,
       contactPhone: notifyPhone,
-      message: buildSmsMessage(event.kind, cameraName, event.started_at, link),
+      message: buildSmsMessage(
+        event.kind,
+        cameraName,
+        event.started_at,
+        link,
+        smsLinksAllowed(),
+        timeZone,
+      ),
     }),
     signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
   });
@@ -842,7 +914,7 @@ Deno.serve(async (req) => {
       channel: "sms",
       run: () =>
         notifyPhone
-          ? sendSms(notifyPhone, event, cameraName, link)
+          ? sendSms(notifyPhone, event, cameraName, link, timeZone)
           : Promise.resolve<SendOutcome>({ status: "skipped", detail: "no phone number" }),
     });
   }
