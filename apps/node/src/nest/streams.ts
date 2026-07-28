@@ -188,20 +188,24 @@ export class NestStreamManager {
    * rotation it did not see leaves it unable to re-dial. Minting a new stream
    * emits `generated`, which restarts go2rtc against a current URL.
    */
-  async refresh(cameraId: string, deviceId: string): Promise<void> {
-    if (this.stopped) return;
+  async refresh(cameraId: string, deviceId: string): Promise<boolean> {
+    if (this.stopped) return false;
     const last = this.lastForcedMs.get(cameraId) ?? 0;
-    if (Date.now() - last < FORCE_REFRESH_COOLDOWN_MS) return;
+    // Returns false when the cooldown swallowed the request, so callers do not
+    // announce a refresh that never happened.
+    if (Date.now() - last < FORCE_REFRESH_COOLDOWN_MS) return false;
     // release() clears the cooldown map for the camera, so stamp it after.
     this.release(cameraId);
     this.lastForcedMs.set(cameraId, Date.now());
     try {
       await this.generate(cameraId, deviceId);
+      return true;
     } catch (err) {
       this.log.warn(
         `forced nest stream refresh failed for camera ${cameraId}: ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 

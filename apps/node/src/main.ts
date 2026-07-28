@@ -135,11 +135,21 @@ async function main(): Promise<void> {
       // No managed stream yet — that is the reconcile's job, not this one.
       if (!nestStreams.urlFor(camera.id)) continue;
       if (isCaptureLive(recorder.lastSegmentAt(camera.id), now)) continue;
-      log.warn(
-        `camera ${camera.id} holds a Nest stream but has not recorded recently ` +
-          `— forcing a fresh stream`,
-      );
-      void nestStreams.refresh(camera.id, camera.nest.deviceId);
+      // Log only if a stream was actually minted. A camera stays un-live for a
+      // minute or two after a refresh while ffmpeg reconnects and fills its
+      // first segment, and the per-camera cooldown correctly suppresses the
+      // repeat attempts in that window — announcing them anyway reads as the
+      // watchdog flapping when it is doing exactly the right thing.
+      void nestStreams
+        .refresh(camera.id, camera.nest.deviceId)
+        .then((refreshed) => {
+          if (refreshed) {
+            log.warn(
+              `camera ${camera.id} held a Nest stream but had not recorded ` +
+                `recently — forced a fresh stream`,
+            );
+          }
+        });
     }
   }, 60_000);
   captureWatchdog.unref();
