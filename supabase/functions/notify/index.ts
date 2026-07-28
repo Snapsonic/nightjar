@@ -248,6 +248,14 @@ function utcHhMm(iso: string): string {
 
 /** External send timeout — never let a slow provider hold the function open. */
 const SEND_TIMEOUT_MS = 5_000;
+/**
+ * How long the email waits for the clip thumbnail to finish uploading before
+ * sending without it: 6 attempts, 2.5s apart, so ~15s worst case. Long enough
+ * for a normal clip upload, short enough that a stuck upload does not sit on
+ * the alert.
+ */
+const THUMBNAIL_WAIT_ATTEMPTS = 6;
+const THUMBNAIL_WAIT_INTERVAL_MS = 2_500;
 
 export function buildPayload(
   event: EventRow,
@@ -708,11 +716,34 @@ async function sendEmail(
   // at delivery, so the short TTL is fine; a failure here just drops the image.
   let thumbnailUrl: string | null = null;
   try {
-    const { data: clip } = await admin
-      .from("events")
-      .select("thumbnail_path")
-      .eq("id", event.id)
-      .maybeSingle();
+    // Wait for the thumbnail before giving up on it.
+    //
+    // events_notify fires AFTER INSERT, and the node inserts the row with
+    // clip_status 'uploading' *before* it uploads anything — thumbnail_path is
+    // still null at that moment and only lands seconds later. Reading it once,
+    // as this did, therefore meant a real alert never carried an image; the
+    // only emails that did were ones re-triggered by hand against events whose
+    // upload had long since finished, which is exactly how the bug survived
+    // being "verified".
+    //
+    // Only the email waits. Push and SMS are dispatched in parallel by the
+    // caller and still go out immediately, so the alert is not delayed — just
+    // its picture. If the upload is slower than the budget the email goes out
+    // without the image, which is what happened on every alert before this.
+    let thumbnailPath: string | null = null;
+    for (let attempt = 0; attempt < THUMBNAIL_WAIT_ATTEMPTS; attempt++) {
+      const { data: row } = await admin
+        .from("events")
+        .select("thumbnail_path")
+        .eq("id", event.id)
+        .maybeSingle();
+      thumbnailPath = row?.thumbnail_path ?? null;
+      if (thumbnailPath) break;
+      if (attempt < THUMBNAIL_WAIT_ATTEMPTS - 1) {
+        await new Promise((r) => setTimeout(r, THUMBNAIL_WAIT_INTERVAL_MS));
+      }
+    }
+    const clip = { thumbnail_path: thumbnailPath };
     if (clip?.thumbnail_path) {
       const { data: signed } = await admin.storage
         .from("event-clips")
