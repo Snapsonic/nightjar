@@ -130,10 +130,12 @@ async function main(): Promise<void> {
    * keep succeeding. That is exactly how five cameras sat dead for ten hours
    * after a transient Google 500, needing a manual restart.
    *
-   * So: a camera that should be recording but has produced no segment for
-   * longer than the liveness window gets a brand new stream, which restarts
-   * go2rtc against a current URL. Rate-limited inside the manager so a camera
-   * that is down for another reason cannot spin on SDM.
+   * Two triggers. Repeated "404 Not Found" from the local restream is the
+   * stale-token signature itself and appears within seconds, so it is acted on
+   * directly. Segment staleness stays as the catch-all for failures that do
+   * not announce themselves. Either way the camera gets a brand new stream,
+   * which restarts go2rtc against a current URL. Rate-limited inside the
+   * manager so a camera down for another reason cannot spin on SDM.
    */
   const captureWatchdog = setInterval(() => {
     const now = Date.now();
@@ -142,7 +144,12 @@ async function main(): Promise<void> {
       if (camera.source !== "nest" || !camera.nest?.deviceId) continue;
       // No managed stream yet — that is the reconcile's job, not this one.
       if (!nestStreams.urlFor(camera.id)) continue;
-      if (isCaptureLive(recorder.lastSegmentAt(camera.id), now)) continue;
+      // Two ways in. Repeated "404 Not Found" is the stale-token signature and
+      // shows up within seconds, so act on it immediately rather than waiting
+      // out the liveness window. Staleness stays as the catch-all for failures
+      // that do not announce themselves.
+      const missing = recorder.streamMissing(camera.id);
+      if (!missing && isCaptureLive(recorder.lastSegmentAt(camera.id), now)) continue;
       // Log only if a stream was actually minted. A camera stays un-live for a
       // minute or two after a refresh while ffmpeg reconnects and fills its
       // first segment, and the per-camera cooldown correctly suppresses the
@@ -154,8 +161,8 @@ async function main(): Promise<void> {
         .then((refreshed) => {
           if (!refreshed) return;
           log.warn(
-            `camera ${cameraId} held a Nest stream but had not recorded ` +
-              `recently — forced a fresh stream`,
+            `camera ${cameraId} ${missing ? "could not reach its stream on go2rtc" : "held a Nest stream but had not recorded recently"}` +
+              ` — forced a fresh stream`,
           );
           // Repaired upstream, so clear the capture backoff instead of letting
           // the loops sit out the delay they earned while it was broken (up to
@@ -168,7 +175,11 @@ async function main(): Promise<void> {
           }, GO2RTC_SETTLE_MS).unref();
         });
     }
-  }, 60_000);
+    // 15s, not 60s: the 404 signature appears within seconds of the stream
+    // going away, and the watchdog can only be as fast as the interval that
+    // looks for it. The work per tick is a few map lookups, and the real cost —
+    // minting a stream — is still rate-limited per camera inside the manager.
+  }, 15_000);
   captureWatchdog.unref();
 
   // Optional user-owned Google Drive backup (device flow, drive.file scope).

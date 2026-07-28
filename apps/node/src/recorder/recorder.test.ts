@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { NodeDb } from "../db.js";
-import { CAPTURE_LIVENESS_MS, isCaptureLive, PRUNE_FLOOR_MS } from "./recorder.js";
+import {
+  CAPTURE_LIVENESS_MS,
+  isCaptureLive,
+  isStreamMissingTail,
+  PRUNE_FLOOR_MS,
+} from "./recorder.js";
 
 const CAMERA_ID = "2e324303-9e08-4c50-89f7-b850a7c1b765";
 
@@ -103,4 +108,18 @@ test("pruneOldRows drops 30-day-old events and queue leftovers, keeps fresh ones
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("isStreamMissingTail recognises go2rtc's 404 for an unserved stream", () => {
+  assert.ok(isStreamMissingTail("Error opening input files: Server returned 404 Not Found"));
+  assert.ok(isStreamMissingTail("server returned 404 not found"));
+});
+
+test("isStreamMissingTail ignores unrelated capture failures", () => {
+  // These recover on their own; treating them as a missing stream would mint
+  // a new SDM stream for every ordinary blip.
+  assert.ok(!isStreamMissingTail("[rtsp @ 0x1] RTP: PT=61: bad cseq 0001 expected=1efa"));
+  assert.ok(!isStreamMissingTail("Could not write header (incorrect codec parameters ?)"));
+  assert.ok(!isStreamMissingTail("Connection timed out"));
+  assert.ok(!isStreamMissingTail(""));
 });

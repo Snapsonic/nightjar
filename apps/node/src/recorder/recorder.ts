@@ -29,10 +29,21 @@ export interface ExportResult {
 const SEGMENT_SECONDS = 60;
 const POLL_MS = 2_000;
 const BACKOFF_START_MS = 1_000;
-// Patient cap: every reconnect asks Google to generate a new SDM stream, and
-// SDM rate-limits per minute — a tight retry herd (5 cams x 2 consumers at
-// 15s) never lets the quota recover. Success still resets to 1s via STABLE_MS.
-const BACKOFF_CAP_MS = 300_000;
+/**
+ * The patient 300s cap this replaces existed because every reconnect made
+ * go2rtc ask Google for a brand new SDM stream, and that API is rate-limited
+ * per minute. Since the node took ownership of Nest stream lifetimes
+ * (nest/streams.ts), a capture reconnect only dials the local go2rtc restream
+ * and costs Google nothing — so the reason for being patient is gone, while
+ * the cost stayed: a camera that hit the cap sat out one to two minutes after
+ * a transient blip, which measured as ~50 minutes of lost footage on the worst
+ * camera in one night, none of it visible to the watchdog.
+ *
+ * The StreamBreaker still guards the case this was really protecting against —
+ * genuine upstream exhaustion — and it does so globally, which per-camera
+ * backoff never could.
+ */
+const BACKOFF_CAP_MS = 20_000;
 /** A capture that survives this long resets the restart backoff. */
 const STABLE_MS = 30_000;
 const PRUNE_INTERVAL_MS = 10 * 60_000;
@@ -58,6 +69,16 @@ const EMERGENCY_PRUNE_MIN_INTERVAL_MS = 30_000;
  */
 export const CAPTURE_LIVENESS_MS = 3 * SEGMENT_SECONDS * 1000;
 
+/**
+ * True when an ffmpeg stderr tail says the local restream has no such stream.
+ *
+ * go2rtc answers 404 for a stream it is not serving, which is what a stale
+ * Nest token looks like from the consumer side — see Recorder.streamMissing.
+ */
+export function isStreamMissingTail(tail: string): boolean {
+  return /404 Not Found/i.test(tail);
+}
+
 /** Pure liveness predicate — true when the newest segment is fresh enough. */
 export function isCaptureLive(lastSegmentAtMs: number | null, nowMs: number): boolean {
   return lastSegmentAtMs !== null && nowMs - lastSegmentAtMs <= CAPTURE_LIVENESS_MS;
@@ -73,6 +94,8 @@ interface CameraRecording {
   spawnedAt: number;
   /** Last time the wedge watchdog killed this capture (kill-once guard). */
   lastWedgeKillMs: number;
+  /** Consecutive exits where go2rtc had no such stream (see streamMissing). */
+  notFoundStreak: number;
   /** Paths already indexed in SQLite (dedupe across polls/restarts). */
   indexed: Set<string>;
   /** Open (still being written) segments: path -> segment row id. */
@@ -162,6 +185,7 @@ export class Recorder {
       pollTimer: null,
       spawnedAt: 0,
       lastWedgeKillMs: 0,
+      notFoundStreak: 0,
       indexed: new Set(this.db.segmentPaths(camera.id)),
       open: new Map(),
       stderrTail: "",
@@ -290,6 +314,21 @@ export class Recorder {
     this.spawn(rec);
   }
 
+  /**
+   * True when this camera's captures keep failing because go2rtc has no such
+   * stream (repeated "404 Not Found").
+   *
+   * This is the stale-token signature: go2rtc lost its producer and re-dialled
+   * with a URL whose auth token had since rotated, so it can never reconnect
+   * on its own. Waiting for the liveness window to lapse costs ~150s; the 404s
+   * are there within seconds, so the watchdog can act on this instead.
+   *
+   * Two in a row, not one: a single 404 is normal while go2rtc is restarting.
+   */
+  streamMissing(cameraId: string): boolean {
+    return (this.recordings.get(cameraId)?.notFoundStreak ?? 0) >= 2;
+  }
+
   lastSegmentAt(cameraId: string): number | null {
     return this.db.latestSegmentAt(cameraId);
   }
@@ -364,6 +403,7 @@ export class Recorder {
       const lived = Date.now() - rec.spawnedAt;
       if (lived > STABLE_MS) {
         rec.backoffMs = BACKOFF_START_MS;
+        rec.notFoundStreak = 0;
         this.breaker.recordSuccess();
       } else if (this.breaker.recordFailure()) {
         this.log.error(
@@ -373,6 +413,9 @@ export class Recorder {
       }
       const delayMs = Math.max(jitterMs(rec.backoffMs), this.breaker.waitMs());
       const tail = rec.stderrTail.trim().split("\n").pop() ?? "";
+      // "404 Not Found" from the local restream means go2rtc is not serving
+      // this stream at all — the stale-token case, which never self-heals.
+      rec.notFoundStreak = isStreamMissingTail(tail) ? rec.notFoundStreak + 1 : 0;
       this.log.warn(
         `ffmpeg for camera ${rec.camera.id} exited (code=${code} signal=${signal})` +
           `${tail ? ` — ${tail}` : ""} — restarting in ${Math.round(delayMs / 1000)}s`,

@@ -26,10 +26,8 @@ const QUIET_MS = 10_000;
 const ALPHA = 0.05;
 
 const BACKOFF_START_MS = 1_000;
-// Patient cap: every reconnect asks Google to generate a new SDM stream, and
-// SDM rate-limits per minute — a tight retry herd (5 cams x 2 consumers at
-// 15s) never lets the quota recover. Success still resets to 1s via STABLE_MS.
-const BACKOFF_CAP_MS = 300_000;
+/** Reconnects are local now — see the same constant in the recorder. */
+const BACKOFF_CAP_MS = 20_000;
 const STABLE_MS = 30_000;
 const KILL_GRACE_MS = 3_000;
 
