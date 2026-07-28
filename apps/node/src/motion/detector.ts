@@ -170,6 +170,19 @@ export class MotionDetector {
     );
   }
 
+  /** Restart one camera's decoder now, resetting its backoff. See Recorder.kick. */
+  kick(cameraId: string): void {
+    const cam = this.running.get(cameraId);
+    if (!cam || cam.stopping || this.stopped) return;
+    cam.backoffMs = BACKOFF_START_MS;
+    if (cam.restartTimer) {
+      clearTimeout(cam.restartTimer);
+      cam.restartTimer = null;
+    }
+    if (cam.proc) return;
+    this.spawn(cam);
+  }
+
   stop(cameraId: string): void {
     const cam = this.running.get(cameraId);
     if (!cam) return;

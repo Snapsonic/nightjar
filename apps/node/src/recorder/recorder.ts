@@ -265,6 +265,31 @@ export class Recorder {
     }
   }
 
+  /**
+   * Restart one camera's capture now, resetting its backoff.
+   *
+   * For when something upstream has been repaired — currently a forced Nest
+   * stream refresh. Repeated capture failures push the restart delay to the
+   * 300s cap (up to ~450s once jitter is applied), which is right when the
+   * upstream is genuinely sick and wrong the moment it is fixed: the stream
+   * would be healthy while the recorder sat out a seven-minute timer. Observed
+   * live as a motion event whose clip export failed with "no recorded
+   * segments" — the camera was up, and we still had no footage of it.
+   */
+  kick(cameraId: string): void {
+    const rec = this.recordings.get(cameraId);
+    if (!rec || rec.stopping || this.stopped) return;
+    rec.backoffMs = BACKOFF_START_MS;
+    if (rec.restartTimer) {
+      clearTimeout(rec.restartTimer);
+      rec.restartTimer = null;
+    }
+    // A live capture needs nothing: it is either working or about to exit and
+    // take the restart path, which now starts from the reset backoff.
+    if (rec.proc) return;
+    this.spawn(rec);
+  }
+
   lastSegmentAt(cameraId: string): number | null {
     return this.db.latestSegmentAt(cameraId);
   }

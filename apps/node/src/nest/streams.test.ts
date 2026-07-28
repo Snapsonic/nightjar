@@ -203,3 +203,22 @@ test("syncCameras leaves a healthy stream alone", async () => {
   assert.equal(calls.length, 1, "reconcile must not churn healthy streams");
   mgr.stopAll();
 });
+
+test("refresh reports whether it actually minted a stream", async () => {
+  const { bridge } = bridgeStub(() => generateResult());
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+  await mgr.acquire("cam-1", "dev-1");
+
+  // First forced refresh acts; the second is inside the cooldown and must say
+  // so, otherwise callers announce a refresh that never happened.
+  assert.equal(await mgr.refresh("cam-1", "dev-1"), true);
+  assert.equal(await mgr.refresh("cam-1", "dev-1"), false);
+  mgr.stopAll();
+});
+
+test("refresh reports false when minting fails", async () => {
+  const { bridge } = bridgeStub(() => new NestCommandError("boom", 500));
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+  assert.equal(await mgr.refresh("cam-1", "dev-1"), false);
+  mgr.stopAll();
+});

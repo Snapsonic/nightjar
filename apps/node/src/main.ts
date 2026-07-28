@@ -17,6 +17,14 @@ import { isCaptureLive, Recorder } from "./recorder/recorder.js";
 
 const VERSION = "0.1.0";
 
+/**
+ * How long to wait after a forced Nest stream refresh before restarting the
+ * capture loops. The refresh debounces a go2rtc restart 5s out, and go2rtc
+ * needs a moment to bind its RTSP port — reconnecting before then just fails
+ * and earns a fresh backoff.
+ */
+const GO2RTC_SETTLE_MS = 10_000;
+
 async function main(): Promise<void> {
   const log = createLogger("node");
   log.info(`Nightjar node v${VERSION} starting`);
@@ -140,15 +148,24 @@ async function main(): Promise<void> {
       // first segment, and the per-camera cooldown correctly suppresses the
       // repeat attempts in that window — announcing them anyway reads as the
       // watchdog flapping when it is doing exactly the right thing.
+      const cameraId = camera.id;
       void nestStreams
-        .refresh(camera.id, camera.nest.deviceId)
+        .refresh(cameraId, camera.nest.deviceId)
         .then((refreshed) => {
-          if (refreshed) {
-            log.warn(
-              `camera ${camera.id} held a Nest stream but had not recorded ` +
-                `recently — forced a fresh stream`,
-            );
-          }
+          if (!refreshed) return;
+          log.warn(
+            `camera ${cameraId} held a Nest stream but had not recorded ` +
+              `recently — forced a fresh stream`,
+          );
+          // Repaired upstream, so clear the capture backoff instead of letting
+          // the loops sit out the delay they earned while it was broken (up to
+          // ~450s at the cap). Deferred past the debounced go2rtc restart that
+          // this refresh triggers — reconnecting before go2rtc is listening
+          // would just fail and earn a fresh backoff.
+          setTimeout(() => {
+            recorder.kick(cameraId);
+            motion.kick(cameraId);
+          }, GO2RTC_SETTLE_MS).unref();
         });
     }
   }, 60_000);
