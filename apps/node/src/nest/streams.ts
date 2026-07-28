@@ -41,6 +41,12 @@ const MIN_RENEW_DELAY_MS = 15_000;
 const RETRY_DELAY_MS = 20_000;
 /** Longer backoff when SDM says 429 — the quota window must drain first. */
 const RATE_LIMIT_DELAY_MS = 120_000;
+/**
+ * Minimum spacing between forced refreshes of the same camera. A forced
+ * refresh mints a new stream, so an unhealthy camera must not be allowed to
+ * ask for one every time the watchdog looks at it.
+ */
+const FORCE_REFRESH_COOLDOWN_MS = 300_000;
 
 interface StreamState {
   deviceId: string;
@@ -84,6 +90,7 @@ export type StreamChange = { cameraId: string; reason: "generated" | "renewed" }
 export class NestStreamManager {
   private readonly streams = new Map<string, StreamState>();
   private readonly emitter = new Emitter<StreamChange>();
+  private readonly lastForcedMs = new Map<string, number>();
   private stopped = false;
 
   constructor(
@@ -113,7 +120,11 @@ export class NestStreamManager {
     for (const [cameraId, deviceId] of wanted) {
       if (this.stopped) return;
       const existing = this.streams.get(cameraId);
-      if (existing && existing.deviceId === deviceId) continue;
+      // A lapsed stream counts as missing. Renewal normally keeps this from
+      // happening, but if that loop ever stops the reconcile is the only thing
+      // that notices — checked against actual expiry rather than the renewal
+      // margin, so it cannot race a renewal that is merely due.
+      if (existing && existing.deviceId === deviceId && !this.isExpired(existing)) continue;
       try {
         await this.acquire(cameraId, deviceId);
       } catch (err) {
@@ -157,6 +168,7 @@ export class NestStreamManager {
     if (!state) return;
     if (state.timer) clearTimeout(state.timer);
     this.streams.delete(cameraId);
+    this.lastForcedMs.delete(cameraId);
   }
 
   /** Stop renewing everything (shutdown). Streams lapse on their own. */
@@ -166,6 +178,37 @@ export class NestStreamManager {
   }
 
   /* ---------- internals ---------- */
+
+  /**
+   * Force a brand new stream for one camera, ignoring the one it holds.
+   *
+   * For the watchdog: when a camera has a stream the node believes is live but
+   * is not recording, the usual suspect is go2rtc holding a URL whose token
+   * rotated underneath it — go2rtc reads its config once at startup, so a
+   * rotation it did not see leaves it unable to re-dial. Minting a new stream
+   * emits `generated`, which restarts go2rtc against a current URL.
+   */
+  async refresh(cameraId: string, deviceId: string): Promise<void> {
+    if (this.stopped) return;
+    const last = this.lastForcedMs.get(cameraId) ?? 0;
+    if (Date.now() - last < FORCE_REFRESH_COOLDOWN_MS) return;
+    // release() clears the cooldown map for the camera, so stamp it after.
+    this.release(cameraId);
+    this.lastForcedMs.set(cameraId, Date.now());
+    try {
+      await this.generate(cameraId, deviceId);
+    } catch (err) {
+      this.log.warn(
+        `forced nest stream refresh failed for camera ${cameraId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** Past its expiry — the stream is dead, not merely due for renewal. */
+  private isExpired(state: StreamState): boolean {
+    return state.expiresAtMs <= Date.now();
+  }
 
   private isStale(state: StreamState): boolean {
     return state.expiresAtMs - Date.now() <= RENEW_MARGIN_MS;

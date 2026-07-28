@@ -153,3 +153,53 @@ test("a new stream reports 'generated' so consumers get repointed", async () => 
   assert.deepEqual(seen, [{ cameraId: "cam-1", reason: "generated" }]);
   mgr.stopAll();
 });
+
+test("refresh mints a new stream even though the current one is still valid", async () => {
+  const { bridge, calls } = bridgeStub(() => generateResult());
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+  const first = await mgr.acquire("cam-1", "dev-1");
+
+  await mgr.refresh("cam-1", "dev-1");
+
+  assert.equal(calls.length, 2, "refresh must bypass the reuse check");
+  assert.ok(mgr.urlFor("cam-1"));
+  assert.equal(first, mgr.urlFor("cam-1")); // same stub URL, but freshly minted
+  mgr.stopAll();
+});
+
+test("refresh is rate limited so a broken camera cannot spin on SDM", async () => {
+  const { bridge, calls } = bridgeStub(() => generateResult());
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+  await mgr.acquire("cam-1", "dev-1");
+
+  await mgr.refresh("cam-1", "dev-1");
+  await mgr.refresh("cam-1", "dev-1");
+  await mgr.refresh("cam-1", "dev-1");
+
+  assert.equal(calls.length, 2, "only the first refresh should reach SDM");
+  mgr.stopAll();
+});
+
+test("syncCameras re-acquires a stream that has actually lapsed", async () => {
+  // Already expired on arrival: the renewal loop is gone and the reconcile is
+  // the only thing that can notice.
+  const { bridge, calls } = bridgeStub(() => generateResult(-1_000));
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+
+  await mgr.syncCameras([{ id: "cam-1", deviceId: "dev-1" }]);
+  await mgr.syncCameras([{ id: "cam-1", deviceId: "dev-1" }]);
+
+  assert.equal(calls.length, 2, "an expired stream must not be treated as live");
+  mgr.stopAll();
+});
+
+test("syncCameras leaves a healthy stream alone", async () => {
+  const { bridge, calls } = bridgeStub(() => generateResult());
+  const mgr = new NestStreamManager(bridge, silent, fastGate());
+
+  await mgr.syncCameras([{ id: "cam-1", deviceId: "dev-1" }]);
+  await mgr.syncCameras([{ id: "cam-1", deviceId: "dev-1" }]);
+
+  assert.equal(calls.length, 1, "reconcile must not churn healthy streams");
+  mgr.stopAll();
+});

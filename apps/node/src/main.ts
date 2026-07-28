@@ -13,7 +13,7 @@ import { MotionDetector } from "./motion/detector.js";
 import { NestBridge } from "./nest/sdm.js";
 import { NestStreamManager } from "./nest/streams.js";
 import { StreamBreaker, StreamStartGate } from "./backoff.js";
-import { Recorder } from "./recorder/recorder.js";
+import { isCaptureLive, Recorder } from "./recorder/recorder.js";
 
 const VERSION = "0.1.0";
 
@@ -98,6 +98,7 @@ async function main(): Promise<void> {
 
   const cameras = new CameraManager(store, log.child("cameras"));
 
+
   // Recorder and motion detector reconcile themselves on config changes.
   // One breaker for both capture loops: the rate limit they trip is per
   // Google project, not per camera or per consumer.
@@ -110,6 +111,38 @@ async function main(): Promise<void> {
   const motion = new MotionDetector(store, log.child("motion"), streamBreaker, streamGate);
   motion.sync();
   const detect = new DetectWorker(log.child("detect"));
+
+  /**
+   * Ties capture health back to stream health.
+   *
+   * A Nest camera can hold a stream the node believes is live while recording
+   * nothing: go2rtc reads its config once at startup, so if it loses its
+   * producer and re-dials with a URL whose token has since rotated, it can
+   * never reconnect — and nothing else notices, because the node's renewals
+   * keep succeeding. That is exactly how five cameras sat dead for ten hours
+   * after a transient Google 500, needing a manual restart.
+   *
+   * So: a camera that should be recording but has produced no segment for
+   * longer than the liveness window gets a brand new stream, which restarts
+   * go2rtc against a current URL. Rate-limited inside the manager so a camera
+   * that is down for another reason cannot spin on SDM.
+   */
+  const captureWatchdog = setInterval(() => {
+    const now = Date.now();
+    for (const camera of store.get().cameras) {
+      if (!camera.enabled || !camera.record) continue;
+      if (camera.source !== "nest" || !camera.nest?.deviceId) continue;
+      // No managed stream yet — that is the reconcile's job, not this one.
+      if (!nestStreams.urlFor(camera.id)) continue;
+      if (isCaptureLive(recorder.lastSegmentAt(camera.id), now)) continue;
+      log.warn(
+        `camera ${camera.id} holds a Nest stream but has not recorded recently ` +
+          `— forcing a fresh stream`,
+      );
+      void nestStreams.refresh(camera.id, camera.nest.deviceId);
+    }
+  }, 60_000);
+  captureWatchdog.unref();
 
   // Optional user-owned Google Drive backup (device flow, drive.file scope).
   // Constructed before the cloud link: the link relays the device flow to the
@@ -168,6 +201,7 @@ async function main(): Promise<void> {
         pipeline.stop();
         nest.stopProbe();
         clearInterval(nestReconcile);
+        clearInterval(captureWatchdog);
         if (go2rtcRestart) clearTimeout(go2rtcRestart);
         nestStreams.stopAll();
         go2rtc.stop();
