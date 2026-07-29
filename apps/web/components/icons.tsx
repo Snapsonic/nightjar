@@ -107,6 +107,34 @@ function AnimalIcon({ className }: IconProps) {
   );
 }
 
+function CatIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...stroke}>
+      {/* pointed ears + whiskers — the silhouette that reads "cat" at 16px */}
+      <path d="M6 10 L5.2 5.6 L8.8 7.6" />
+      <path d="M18 10 L18.8 5.6 L15.2 7.6" />
+      <path d="M6 10.6 a6 5.4 0 0 0 12 0" />
+      <circle cx="9.6" cy="12.4" r="0.6" />
+      <circle cx="14.4" cy="12.4" r="0.6" />
+      <path d="M3.6 14.2 h3.4 M17 14.2 h3.4" />
+    </svg>
+  );
+}
+
+function DogIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...stroke}>
+      {/* floppy ears + muzzle */}
+      <path d="M6.4 7.4 a2.4 3.4 0 0 0 -1.8 5.6" />
+      <path d="M17.6 7.4 a2.4 3.4 0 0 1 1.8 5.6" />
+      <path d="M6.4 10 a5.6 5.2 0 0 0 11.2 0 a5.6 5.2 0 0 0 -11.2 0 Z" />
+      <circle cx="9.8" cy="11.4" r="0.6" />
+      <circle cx="14.2" cy="11.4" r="0.6" />
+      <path d="M12 13.4 v1.4 M10.6 16 a1.8 1.4 0 0 0 2.8 0" />
+    </svg>
+  );
+}
+
 function PackageIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...stroke}>
@@ -134,6 +162,8 @@ const KIND_ICONS: Record<EventKind, (props: IconProps) => ReactElement> = {
   person: PersonIcon,
   vehicle: VehicleIcon,
   animal: AnimalIcon,
+  cat: CatIcon,
+  dog: DogIcon,
   package: PackageIcon,
   bear: BearIcon,
 };

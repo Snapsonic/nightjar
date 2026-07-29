@@ -38,6 +38,11 @@ const KIND_PRIORITY: Record<EventKind, number> = {
   bear: 4,
   package: 3,
   vehicle: 2,
+  // Pets rank above generic "animal" (they are the identification the user
+  // actually wants) but below everything else: a frame containing both the dog
+  // and a delivery should be reported as the delivery.
+  dog: 1.5,
+  cat: 1.5,
   animal: 1,
   motion: 0,
 };

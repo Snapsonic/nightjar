@@ -19,6 +19,8 @@ const KIND_LABELS: Record<EventKind, string> = {
   person: "Person",
   vehicle: "Vehicle",
   animal: "Animal",
+  cat: "Cat",
+  dog: "Dog",
   package: "Package",
   bear: "Bear",
 };
@@ -208,7 +210,7 @@ export function EventsFeed({ cameras }: { cameras: CameraRef[] }) {
             <p className="mt-1 text-xs text-fog-500">
               {kind || cameraId
                 ? "Nothing matches these filters."
-                : "When your cameras detect motion, people, vehicles, animals or packages, events show up here."}
+                : "When your cameras detect motion, people, vehicles, pets, animals or packages, events show up here."}
             </p>
           </div>
         ) : (

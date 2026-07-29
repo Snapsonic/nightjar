@@ -61,8 +61,8 @@ const COCO_TO_KIND: ReadonlyMap<number, EventKind> = new Map<number, EventKind>(
   [5, "vehicle"], // bus
   [7, "vehicle"], // truck
   [14, "animal"], // bird
-  [15, "animal"], // cat
-  [16, "animal"], // dog
+  [15, "cat"],
+  [16, "dog"],
   [17, "animal"], // horse
   [18, "animal"], // sheep
   [19, "animal"], // cow

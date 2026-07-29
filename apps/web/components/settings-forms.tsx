@@ -112,6 +112,8 @@ const KIND_LABELS: Record<EventKind, string> = {
   person: "Person",
   vehicle: "Vehicle",
   animal: "Animal",
+  cat: "Cat",
+  dog: "Dog",
   package: "Package",
   bear: "Bear",
 };
