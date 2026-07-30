@@ -524,6 +524,15 @@ export class Recorder {
       if (!rec.indexed.has(file.path)) {
         rec.indexed.add(file.path);
         rec.open.set(file.path, this.db.insertSegment(rec.camera.id, file.path, file.startedAt));
+        // A brand new segment file is proof this camera's stream is being
+        // served: ffmpeg opens the segment muxer only after the input opened,
+        // so the 404 case never gets this far. Without clearing here the
+        // streak survives for the whole life of a healthy capture — it is only
+        // otherwise touched when ffmpeg exits — and streamMissing() keeps
+        // reporting a camera that is recording fine as unreachable. The
+        // watchdog then mints a needless SDM stream and restarts go2rtc, which
+        // drops the capture and motion pipelines of all five cameras at once.
+        rec.notFoundStreak = 0;
       }
       if (newest && file.startedAt < newest.startedAt) {
         const id = rec.open.get(file.path);
