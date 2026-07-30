@@ -32,7 +32,7 @@ const SNAPSHOT_TIMEOUT_MS = 2_000;
 const MIN_DETECTION_SCORE = 0.5;
 /** One extra detection pass this long after motionStart (if still open). */
 const REDETECT_DELAY_MS = 10_000;
-/** Event kind upgrade priority — higher wins regardless of score. */
+/** Event kind priority — higher wins, but only from close enough behind (see pickKind). */
 const KIND_PRIORITY: Record<EventKind, number> = {
   person: 5,
   bear: 4,
@@ -46,6 +46,43 @@ const KIND_PRIORITY: Record<EventKind, number> = {
   animal: 1,
   motion: 0,
 };
+/**
+ * Score a detection needs before it may pull rank on something that scored
+ * higher. Detections between MIN_DETECTION_SCORE and this are real enough to
+ * record but too weak to relabel the whole event.
+ *
+ * Deliberately close to the floor. A rule that instead asked a high-priority
+ * kind to stay within some margin of the best detection read well in the
+ * abstract and was wrong in practice: a person at 58% standing beside a van at
+ * 72% got demoted to a vehicle event. On a security camera a missed person
+ * costs more than a spurious one, so the bar for demoting person is set at
+ * "barely above the floor", not "close to the winner".
+ */
+const KIND_CREDIBLE = 0.55;
+
+/**
+ * Decide an event's kind and score from everything detected so far.
+ *
+ * Priority alone used to decide this, "regardless of score", which let any
+ * person detection outrank any animal one. A 51% person on a terracotta
+ * chiminea beat a correctly identified 63% cat, and the alert read "Person
+ * detected" — the model had actually got the cat right. The score made it
+ * worse: it was the maximum across every detection whatever its kind, so that
+ * alert reported the cat's 63% as its confidence in a person nobody had seen.
+ *
+ * So priority now only ranks detections that are credible on their own, and
+ * the score reported always belongs to the kind that won.
+ */
+export function pickKind(detections: Detection[]): { kind: EventKind; score: number } | null {
+  if (detections.length === 0) return null;
+  // Fall back to everything when nothing clears the bar, so a lone weak
+  // detection still names its event rather than silently becoming motion.
+  const credible = detections.filter((d) => d.score >= KIND_CREDIBLE);
+  const pool = credible.length > 0 ? credible : detections;
+  const winner = pool.reduce((a, b) => (KIND_PRIORITY[b.kind] > KIND_PRIORITY[a.kind] ? b : a));
+  const score = Math.max(...detections.filter((d) => d.kind === winner.kind).map((d) => d.score));
+  return { kind: winner.kind, score };
+}
 /** Extra wait before cutting so the post-roll footage exists on disk. */
 const CLOSE_SLACK_MS = 2_000;
 /** Bounded offline queue — oldest jobs beyond this are dropped. */
@@ -94,7 +131,7 @@ export interface EventPipelineDeps {
  * motionStart opens a candidate event (kind "motion", score 0.5), grabs a
  * full-color JPEG snapshot from go2rtc (the 320x180 grayscale motion frame is
  * too small/colorless for detection) and hands it to the detect worker
- * (YOLOX-tiny), which may upgrade kind/score; a second pass runs 10s in if
+ * (YOLOX-s), which may upgrade kind/score; a second pass runs 10s in if
  * the event is still open. motionEnd schedules the close: clip bounds are start-5s .. end+5s (clamped
  * to now); the clip is cut from the recorder's segments, a mid-clip 640w jpeg
  * thumbnail is extracted, the event row is written to SQLite and an upload
@@ -244,16 +281,18 @@ export class EventPipeline {
         }
       }
       candidate.detections.push(...detections);
-      for (const detection of detections) {
-        if (KIND_PRIORITY[detection.kind] > KIND_PRIORITY[candidate.kind]) {
-          candidate.kind = detection.kind;
-        }
-        candidate.score = Math.max(candidate.score, detection.score);
+      // Recomputed over every detection so far, not folded in one at a time:
+      // the second pass can only be judged against the first if both are on
+      // the table at once.
+      const picked = pickKind(candidate.detections);
+      if (picked) {
+        candidate.kind = picked.kind;
+        candidate.score = picked.score;
       }
       this.deps.log.info(
         `event ${candidate.id}: detected ${detections
           .map((d) => `${d.kind} ${(d.score * 100).toFixed(0)}%`)
-          .join(", ")} — kind ${candidate.kind}`,
+          .join(", ")} — kind ${candidate.kind} ${(candidate.score * 100).toFixed(0)}%`,
       );
     } catch (err) {
       this.deps.log.warn(`detect failed: ${err instanceof Error ? err.message : String(err)}`);

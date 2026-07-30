@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import type { NightjarClient } from "@nightjar/db";
-import { EventPipeline } from "./pipeline.js";
+import { EventPipeline, pickKind } from "./pipeline.js";
 import type { CloudLink } from "../cloud/link.js";
 import { ConfigStore } from "../config/store.js";
 import { NodeDb } from "../db.js";
@@ -211,5 +211,70 @@ describe("event_clips drive_url", () => {
       fx.db.close();
       rmSync(fx.root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("pickKind", () => {
+  const det = (kind: string, score: number) =>
+    ({ kind, score, box: [0, 0, 0.1, 0.1], atMs: 0 }) as never;
+
+  it("does not let a marginal person outrank a better-scoring cat", () => {
+    // The real alert this fixes: a 51% person on a terracotta chiminea beat a
+    // correctly identified 63% cat, and reported the cat's own 63% as its
+    // confidence in the person.
+    const picked = pickKind([det("animal", 0.631), det("person", 0.51)]);
+    assert.equal(picked?.kind, "animal");
+    assert.equal(picked?.score, 0.631);
+  });
+
+  it("still reports the person when the two are close", () => {
+    // Priority is the point: a frame holding both the dog and a delivery is a
+    // delivery, and a near-tie must not flip that.
+    const picked = pickKind([det("dog", 0.75), det("person", 0.7)]);
+    assert.equal(picked?.kind, "person");
+    assert.equal(picked?.score, 0.7); // the person's score, not the dog's
+  });
+
+  it("a confident person outranks a higher-scoring animal", () => {
+    const picked = pickKind([det("cat", 0.95), det("person", 0.8)]);
+    assert.equal(picked?.kind, "person");
+    assert.equal(picked?.score, 0.8);
+  });
+
+  it("a barely-there person loses to a confident cat", () => {
+    const picked = pickKind([det("cat", 0.95), det("person", 0.52)]);
+    assert.equal(picked?.kind, "cat");
+  });
+
+  it("keeps the person beside a much better vehicle", () => {
+    // The regression this rule was retuned for: a real person at 58% next to a
+    // parked van at 72%. Demoting that to a vehicle event loses the alert that
+    // actually matters.
+    const picked = pickKind([det("vehicle", 0.72), det("person", 0.58)]);
+    assert.equal(picked?.kind, "person");
+    assert.equal(picked?.score, 0.58);
+  });
+
+  it("a lone weak detection still names its event", () => {
+    const picked = pickKind([det("person", 0.51)]);
+    assert.equal(picked?.kind, "person");
+  });
+
+  it("keeps the person beside a slightly better vehicle", () => {
+    // Within the margin, so priority applies — a person next to a car is the
+    // thing worth reporting.
+    const picked = pickKind([det("vehicle", 0.62), det("person", 0.6)]);
+    assert.equal(picked?.kind, "person");
+    assert.equal(picked?.score, 0.6);
+  });
+
+  it("reports the strongest box of the winning kind", () => {
+    const picked = pickKind([det("person", 0.7), det("person", 0.84), det("vehicle", 0.9)]);
+    assert.equal(picked?.kind, "person");
+    assert.equal(picked?.score, 0.84);
+  });
+
+  it("returns null when nothing was detected", () => {
+    assert.equal(pickKind([]), null);
   });
 });
