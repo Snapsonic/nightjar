@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { NodeDb } from "../db.js";
 import {
   CAPTURE_LIVENESS_MS,
+  coverageFraction,
   isCaptureLive,
   isStreamMissingTail,
   PRUNE_FLOOR_MS,
@@ -104,6 +105,63 @@ test("pruneOldRows drops 30-day-old events and queue leftovers, keeps fresh ones
     assert.equal(db.getEvent("11111111-1111-1111-1111-111111111111"), undefined);
     assert.ok(db.getEvent("22222222-2222-2222-2222-222222222222"));
     assert.equal(db.nextUpload()?.event_id, "22222222-2222-2222-2222-222222222222");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("coverage distinguishes a churning camera that isCaptureLive calls healthy", () => {
+  const { db, dir } = scratchDb();
+  const now = 1_784_000_000_000;
+  const windowMs = 600_000;
+  const t0 = now - windowMs;
+  try {
+    // A camera that reconnects constantly: ten 25s captures spread over the
+    // window. Every one of them is recent, so liveness is satisfied...
+    for (let i = 0; i < 10; i++) {
+      const startedAt = t0 + i * 60_000;
+      db.endSegment(
+        db.insertSegment(CAMERA_ID, `/rec/churn-${i}.mp4`, startedAt),
+        startedAt + 25_000,
+      );
+    }
+    assert.equal(isCaptureLive(db.latestSegmentAt(CAMERA_ID), now), true);
+    // ...while less than half the window is actually on disk.
+    const churning = coverageFraction(db.capturedMsBetween(CAMERA_ID, t0, now, now), windowMs);
+    assert.equal(churning, 250_000 / windowMs);
+    assert.ok(churning < 0.5, "a camera losing 35s a minute must not read as healthy");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("capturedMsBetween clamps to the window and measures open segments to now", () => {
+  const { db, dir } = scratchDb();
+  const now = 1_784_000_000_000;
+  const windowMs = 600_000;
+  const t0 = now - windowMs;
+  try {
+    // Straddles the start of the window — only the part inside counts.
+    db.endSegment(db.insertSegment(CAMERA_ID, "/rec/before.mp4", t0 - 40_000), t0 + 20_000);
+    // Wholly outside — contributes nothing.
+    db.endSegment(db.insertSegment(CAMERA_ID, "/rec/ancient.mp4", t0 - 300_000), t0 - 240_000);
+    // Open (still being written): counted up to now, not to a phantom end.
+    db.insertSegment(CAMERA_ID, "/rec/open.mp4", now - 30_000);
+    // Another camera's footage must not leak in.
+    db.endSegment(
+      db.insertSegment("00000000-0000-0000-0000-000000000000", "/rec/other.mp4", t0),
+      now,
+    );
+
+    assert.equal(db.capturedMsBetween(CAMERA_ID, t0, now, now), 20_000 + 30_000);
+    // A fully covered window reads as exactly 1, never more.
+    db.endSegment(db.insertSegment(CAMERA_ID, "/rec/full.mp4", t0 - 60_000), now + 60_000);
+    assert.equal(
+      coverageFraction(db.capturedMsBetween(CAMERA_ID, t0, now, now), windowMs),
+      1,
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

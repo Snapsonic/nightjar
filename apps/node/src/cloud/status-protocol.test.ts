@@ -16,6 +16,7 @@ test("status_reply accepts the new optional capturing/lastSegmentAt fields", () 
         online: true,
         recording: true,
         capturing: true,
+        coverage: 0.93,
         lastSegmentAt: "2026-07-26T00:00:00.000Z",
       },
     ],
@@ -23,6 +24,21 @@ test("status_reply accepts the new optional capturing/lastSegmentAt fields", () 
   const viaUnion = RealtimeMessage.parse(JSON.parse(JSON.stringify(message)));
   assert.deepEqual(viaUnion, message);
   assert.deepEqual(NodeStatusReply.parse(message), message);
+});
+
+test("status_reply rejects a coverage outside 0..1", () => {
+  const withCoverage = (coverage: number) => ({
+    type: "status_reply",
+    requestId: "req-1",
+    version: "0.1.0",
+    uptimeSec: 42,
+    cameras: [{ cameraId: CAMERA_ID, online: true, recording: true, coverage }],
+  });
+  assert.ok(NodeStatusReply.safeParse(withCoverage(0)).success);
+  assert.ok(NodeStatusReply.safeParse(withCoverage(1)).success);
+  // A percentage that escaped its conversion must not reach the dashboard.
+  assert.ok(!NodeStatusReply.safeParse(withCoverage(93)).success);
+  assert.ok(!NodeStatusReply.safeParse(withCoverage(-0.1)).success);
 });
 
 test("status_reply without the new fields still parses (additive change)", () => {

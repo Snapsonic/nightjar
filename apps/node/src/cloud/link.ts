@@ -904,6 +904,11 @@ export class CloudLink {
           : streams !== null && go2rtcStreamName(camera.id) in streams,
         recording,
         capturing,
+        // Rounded to whole percent: this is for display, and the extra
+        // precision would only make an idle camera's number jitter.
+        ...(recording
+          ? { coverage: Math.round(this.deps.recorder.coverage(camera.id) * 100) / 100 }
+          : {}),
         ...(lastSegmentAtMs !== null
           ? { lastSegmentAt: new Date(lastSegmentAtMs).toISOString() }
           : {}),

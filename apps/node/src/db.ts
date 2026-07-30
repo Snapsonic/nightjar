@@ -241,6 +241,28 @@ export class NodeDb {
       .all(cameraId, t1Ms, t0Ms) as SegmentRow[];
   }
 
+  /**
+   * Milliseconds of recorded footage actually covering [t0Ms, t1Ms) for one
+   * camera — each overlapping segment clamped to the window and summed.
+   *
+   * Segment *count* cannot answer this: a camera that reconnects every 25s
+   * produces more, shorter segments than a healthy one and would outrank it.
+   * An open segment is measured up to nowMs, since that is how much of it has
+   * been written so far.
+   */
+  capturedMsBetween(cameraId: string, t0Ms: number, t1Ms: number, nowMs: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(
+           MIN(COALESCE(ended_at, ?), ?) - MAX(started_at, ?)
+         ), 0) AS ms
+         FROM segments
+         WHERE camera_id = ? AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)`,
+      )
+      .get(nowMs, t1Ms, t0Ms, cameraId, t1Ms, t0Ms) as { ms: number };
+    return Math.max(0, row.ms);
+  }
+
   insertEvent(event: NvrEvent): void {
     this.db
       .prepare(

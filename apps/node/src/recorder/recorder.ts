@@ -84,6 +84,20 @@ export function isCaptureLive(lastSegmentAtMs: number | null, nowMs: number): bo
   return lastSegmentAtMs !== null && nowMs - lastSegmentAtMs <= CAPTURE_LIVENESS_MS;
 }
 
+/**
+ * Window that capture coverage is reported over.
+ *
+ * Long enough that one reconnect does not dominate the number, short enough
+ * that it still describes now rather than this morning.
+ */
+export const COVERAGE_WINDOW_MS = 15 * 60_000;
+
+/** Recorded fraction (0..1) of a window, from captured vs elapsed ms. */
+export function coverageFraction(capturedMs: number, windowMs: number): number {
+  if (windowMs <= 0) return 0;
+  return Math.min(1, Math.max(0, capturedMs / windowMs));
+}
+
 interface CameraRecording {
   camera: CameraConfig;
   proc: ChildProcess | null;
@@ -331,6 +345,21 @@ export class Recorder {
 
   lastSegmentAt(cameraId: string): number | null {
     return this.db.latestSegmentAt(cameraId);
+  }
+
+  /**
+   * Fraction (0..1) of the last COVERAGE_WINDOW_MS this camera actually has
+   * footage for.
+   *
+   * The honest companion to isCaptureLive, which only asks whether *a* segment
+   * landed within 180s — so a camera reconnecting every 25s reads as perfectly
+   * healthy while losing more than half its footage. A node can report five of
+   * five cameras live and still be recording ~90% of the day; this is the
+   * number that says so.
+   */
+  coverage(cameraId: string, windowMs = COVERAGE_WINDOW_MS): number {
+    const now = Date.now();
+    return coverageFraction(this.db.capturedMsBetween(cameraId, now - windowMs, now, now), windowMs);
   }
 
   /* ---------- capture ---------- */

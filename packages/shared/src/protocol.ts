@@ -60,6 +60,13 @@ export const NodeStatusReply = z.object({
       recording: z.boolean(),
       /** True when the recorder indexed a segment recently (capture liveness). */
       capturing: z.boolean().optional(),
+      /**
+       * Fraction (0..1) of the recent window this camera has footage for.
+       * `capturing` only says a segment landed lately; this says how much of
+       * the time was actually recorded, so a camera that keeps reconnecting
+       * stops reading as perfectly healthy.
+       */
+      coverage: z.number().min(0).max(1).optional(),
       /** ISO time of the newest indexed recording segment, when any exists. */
       lastSegmentAt: z.string().optional(),
     }),
