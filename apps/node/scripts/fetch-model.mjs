@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Downloads the YOLOX-tiny ONNX model used by the detect worker.
+// Downloads the YOLOX-s ONNX model used by the detect worker.
 //
 // Source: official Megvii YOLOX release (Apache-2.0):
-//   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
+//   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx
 //   License: Apache License 2.0 — https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE
 //
 // Usage: pnpm --filter @nightjar/node fetch-model
-// The file lands in apps/node/models/yolox_tiny.onnx (gitignored, ~20 MB).
+// The file lands in apps/node/models/yolox_s.onnx (gitignored, ~35 MB).
 
 import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -14,12 +14,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MODEL_URL =
-  "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx";
+  "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx";
 /** Exact size of the release asset — guards against truncated downloads. */
-const MODEL_BYTES = 20219662;
+const MODEL_BYTES = 35858002;
 
 const modelsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "models");
-const target = path.join(modelsDir, "yolox_tiny.onnx");
+const target = path.join(modelsDir, "yolox_s.onnx");
 
 try {
   if (statSync(target).size === MODEL_BYTES) {
@@ -31,7 +31,7 @@ try {
   // missing — download below
 }
 
-console.log(`downloading YOLOX-tiny (Apache-2.0) from ${MODEL_URL} ...`);
+console.log(`downloading YOLOX-s (Apache-2.0) from ${MODEL_URL} ...`);
 const res = await fetch(MODEL_URL, { redirect: "follow" });
 if (!res.ok) {
   console.error(`download failed: HTTP ${res.status}`);

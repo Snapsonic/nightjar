@@ -12,7 +12,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
  * Object-detection front end: a pool of one worker_thread (see
  * inference-worker.ts) shared across cameras. JPEG snapshots are posted with
  * a transferable ArrayBuffer (zero-copy into the thread) and matched back by
- * request id. The worker runs a YOLOX-tiny ONNX session (Apache-2.0, see
+ * request id. The worker runs a YOLOX-s ONNX session (Apache-2.0, see
  * inference-worker.ts for provenance); if the worker cannot start (or dies,
  * e.g. missing model file), detect() degrades to returning [] so the event
  * pipeline keeps running with kind "motion".
@@ -46,7 +46,7 @@ export class DetectWorker {
         if (this.worker === worker) this.failWorker(worker);
       });
       this.worker = worker;
-      this.log.info("detect worker thread started (YOLOX-tiny, CPU)");
+      this.log.info("detect worker thread started (YOLOX-s, CPU)");
       return worker;
     } catch (err) {
       this.workerFailed = true;

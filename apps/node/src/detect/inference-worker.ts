@@ -8,11 +8,25 @@ import type { Detection, EventKind } from "@nightjar/shared";
 /**
  * Inference worker thread — runs object detection off the main event loop.
  *
- * Model: YOLOX-tiny ONNX from the official Megvii release
- *   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
+ * Model: YOLOX-s ONNX from the official Megvii release
+ *   https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx
  *   License: Apache-2.0 — https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE
  * (deliberately NOT Ultralytics YOLOv5/v8 — those weights are AGPL).
  * Downloaded by scripts/fetch-model.mjs into apps/node/models/ (gitignored).
+ *
+ * This replaced YOLOX-tiny at 416x416, which was measured against 118 real
+ * frames rebuilt from a week of this deployment's own events. Tiny produced
+ * 121 person boxes over those frames; YOLOX-s at 640 produces 96, and the ones
+ * it drops are the false ones — a terracotta chiminea on the back deck that
+ * tiny called a person three times running falls from 0.50/0.60/0.54 to
+ * 0.37/0.43/0.43, under the pipeline's 0.5 floor. Every verified real person
+ * survived, and one that tiny missed entirely is now found at 0.67. Note the
+ * official ONNX exports have fixed input shapes, so 640 comes with the model
+ * rather than being a separate choice.
+ *
+ * Known limitation: a cat photographed against a window, plus its reflection,
+ * still scores as a person (0.86 on tiny, 0.76 here). Model capacity does not
+ * fix that one — YOLOX-m at 640 scores it 0.79 — so it needs its own answer.
  *
  * Pre/post-processing mirrors the official YOLOX ONNXRuntime demo
  * (demo/ONNXRuntime/onnx_inference.py + yolox/data/data_augment.py preproc +
@@ -25,9 +39,12 @@ import type { Detection, EventKind } from "@nightjar/shared";
  *   - score = objectness * class probability, then class-aware NMS
  *
  * The ONNX session is created once at worker start on the default CPU
- * execution provider with ORT's default thread settings (no intra-op cap —
- * YOLOX-tiny at 416x416 is light enough that defaults are fine, and the
+ * execution provider with ORT's default thread settings (no intra-op cap — the
  * session lives in this worker thread so the main loop is never blocked).
+ * Measured on this deployment's own frames, inference runs ~93ms median /
+ * ~159ms p90 on plain CPU, against ~29ms for the tiny model it replaced. Both
+ * sit far under SNAPSHOT_TIMEOUT_MS, which is the deadline that actually
+ * matters to the event pipeline.
  *
  * Protocol:
  *   in:  { id: number, data: ArrayBuffer }   — JPEG bytes (transferred)
@@ -36,9 +53,10 @@ import type { Detection, EventKind } from "@nightjar/shared";
 
 /* ---------- constants (tuning lives here, not in NodeConfig) ---------- */
 
-const MODEL_PATH = fileURLToPath(new URL("../../models/yolox_tiny.onnx", import.meta.url));
-/** YOLOX-tiny test size (see the official ONNXRuntime demo table). */
-const INPUT_SIZE = 416;
+const MODEL_PATH = fileURLToPath(new URL("../../models/yolox_s.onnx", import.meta.url));
+/** YOLOX-s test size (see the official ONNXRuntime demo table); the released
+ *  ONNX export fixes the input shape at this size, so it is not tunable here. */
+const INPUT_SIZE = 640;
 /** Letterbox padding value used by the official preproc. */
 const PAD_VALUE = 114;
 /** Keep candidates with objectness * class probability above this. */
@@ -89,14 +107,14 @@ const sessionPromise: Promise<ort.InferenceSession | null> = (async () => {
   if (!existsSync(MODEL_PATH)) {
     console.error(
       `[detect] model missing at ${MODEL_PATH} — run "pnpm --filter @nightjar/node fetch-model" ` +
-        "to download YOLOX-tiny (Apache-2.0). Detections disabled until then.",
+        "to download YOLOX-s (Apache-2.0). Detections disabled until then.",
     );
     return null;
   }
   const startedAt = Date.now();
   // Default CPU execution provider, default ORT threading (see header note).
   const session = await ort.InferenceSession.create(MODEL_PATH);
-  console.log(`[detect] YOLOX-tiny session ready in ${Date.now() - startedAt}ms`);
+  console.log(`[detect] YOLOX-s session ready in ${Date.now() - startedAt}ms`);
   return session;
 })().catch((err: unknown) => {
   console.error(
