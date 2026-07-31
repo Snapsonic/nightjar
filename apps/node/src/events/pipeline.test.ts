@@ -369,3 +369,116 @@ describe("detection snapshots", () => {
     }
   });
 });
+
+describe("motion-independent sweep", () => {
+  const CAM = "7c0939a2-275a-4d1e-a7ba-70371fbe98a5";
+  const det = (kind: string, score: number) =>
+    ({ kind, score, box: [0.5, 0.5, 0.05, 0.1], atMs: 0 }) as never;
+
+  function makeSwept(detections: unknown[], record = true) {
+    const root = mkdtempSync(path.join(tmpdir(), "nightjar-sweep-"));
+    const store = new ConfigStore(silentLog, path.join(root, "config"));
+    store.update({
+      cameras: [
+        {
+          id: CAM,
+          name: "Backyard",
+          enabled: true,
+          record,
+          source: "nest",
+          nest: { deviceId: "enterprises/p/devices/d" },
+        },
+      ] as never,
+    });
+    const pipeline = new EventPipeline({
+      db: new NodeDb(path.join(root, "db")),
+      link: { getClient: () => null, getNodeId: () => NODE_ID } as unknown as CloudLink,
+      recorder: { latestFrame: async () => Buffer.from("jpeg") } as never,
+      detect: { detect: async () => detections } as never,
+      store,
+      log: silentLog,
+    });
+    const openMap = (pipeline as unknown as { open: Map<string, { kind: string; score: number }> })
+      .open;
+    const sweep = () => (pipeline as unknown as { runSweep(): Promise<void> }).runSweep();
+    return { pipeline, sweep, openMap, root };
+  }
+
+  it("opens an event for a cat that never tripped motion", async () => {
+    const fx = makeSwept([det("cat", 0.62)]);
+    try {
+      await fx.sweep();
+      const ev = fx.openMap.get(CAM);
+      assert.equal(ev?.kind, "cat");
+      assert.equal(ev?.score, 0.62);
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("admits a cat below the general floor but above the animal floor", async () => {
+    // 0.45 is under MIN_DETECTION_SCORE and over MIN_ANIMAL_DETECTION_SCORE —
+    // the range a deck-distance cat actually scores in.
+    const fx = makeSwept([det("cat", 0.45)]);
+    try {
+      await fx.sweep();
+      assert.equal(fx.openMap.get(CAM)?.kind, "cat");
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores people and vehicles — they trip motion, and the hedge does not move", async () => {
+    // The Backyard hedge scores person 0.86 continuously. A sweep that raised
+    // person events would fire one every interval, for ever.
+    const fx = makeSwept([det("person", 0.86), det("vehicle", 0.9)]);
+    try {
+      await fx.sweep();
+      assert.equal(fx.openMap.get(CAM), undefined);
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-open for the same cat on the next sweep (cooldown)", async () => {
+    const fx = makeSwept([det("cat", 0.62)]);
+    try {
+      await fx.sweep();
+      const first = fx.openMap.get(CAM);
+      assert.ok(first);
+      fx.openMap.delete(CAM); // simulate the event closing
+      await fx.sweep();
+      assert.equal(fx.openMap.get(CAM), undefined, "cooldown must suppress the repeat");
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a camera alone while motion already owns it", async () => {
+    const fx = makeSwept([det("cat", 0.62)]);
+    try {
+      const existing = { kind: "motion", score: 0.5 };
+      fx.openMap.set(CAM, existing as never);
+      await fx.sweep();
+      assert.equal(fx.openMap.get(CAM), existing, "must not replace the open motion event");
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips cameras whose frames are not on disk (record=false)", async () => {
+    const fx = makeSwept([det("cat", 0.62)], false);
+    try {
+      await fx.sweep();
+      assert.equal(fx.openMap.get(CAM), undefined);
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+});

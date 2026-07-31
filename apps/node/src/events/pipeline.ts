@@ -40,8 +40,53 @@ const SNAPSHOT_TIMEOUT_MS = 2_000;
 const SNAPSHOT_MAX_AGE_MS = 30_000;
 /** Detections below this score are discarded by the pipeline. */
 const MIN_DETECTION_SCORE = 0.5;
+/**
+ * Floor for animal kinds, which is lower because they are smaller.
+ *
+ * A cat crossing the back deck lands 40-60px tall in a 1080p frame and scores
+ * 0.36-0.65 — measured over 790 frames of real footage, where 42 animal
+ * detections spanned that range and only 18 cleared 0.5. The general floor is
+ * tuned for subjects that fill much more of the frame, and applying it to a
+ * distant cat threw away more than half the evidence that the cat was there.
+ *
+ * 0.4 rather than the 0.35 the worker already enforces: it keeps 36 of those
+ * 42 while leaving some margin above the noise. A weak animal cannot hijack
+ * somebody else's event either way, since pickKind only lets detections above
+ * KIND_CREDIBLE pull rank.
+ */
+const MIN_ANIMAL_DETECTION_SCORE = 0.4;
+const ANIMAL_KINDS: ReadonlySet<EventKind> = new Set<EventKind>(["cat", "dog", "animal"]);
+/** Per-kind score floor for pipeline-level filtering. */
+function minScoreFor(kind: EventKind): number {
+  return ANIMAL_KINDS.has(kind) ? MIN_ANIMAL_DETECTION_SCORE : MIN_DETECTION_SCORE;
+}
 /** One extra detection pass this long after motionStart (if still open). */
 const REDETECT_DELAY_MS = 10_000;
+/**
+ * How often every recording camera is detected on regardless of motion.
+ *
+ * Motion is a change detector on a 320x180 frame with a 1.5% trigger — about a
+ * 30x30 block. A cat on the back deck covers 0.3-1.0% of that frame, so it can
+ * never move enough pixels and no event ever opens: on 2026-07-31 one wandered
+ * around for three separate visits, 16 minutes of footage in total, and
+ * produced not a single event. Nothing downstream could help, because nothing
+ * downstream ran. Small and slow subjects are structurally invisible to frame
+ * differencing, and no threshold tuning changes that — only looking anyway
+ * does.
+ *
+ * 30s gives roughly ten chances across a visit of that length, at a cost of one
+ * frame read plus ~72ms of inference per recording camera.
+ */
+const SWEEP_INTERVAL_MS = 30_000;
+/**
+ * After the sweep opens an event for a camera, it stays quiet this long.
+ *
+ * An animal that settles in stays detected for minutes on end, and without
+ * this every sweep would open another event for the same cat on the same deck.
+ */
+const SWEEP_COOLDOWN_MS = 5 * 60_000;
+/** Footage either side of a sweep detection, which is an instant, not a span. */
+const SWEEP_EVENT_PAD_MS = 5_000;
 /** Event kind priority — higher wins, but only from close enough behind (see pickKind). */
 const KIND_PRIORITY: Record<EventKind, number> = {
   person: 5,
@@ -156,6 +201,9 @@ export class EventPipeline {
   private running = true;
   private uploaderLoop: Promise<void> | null = null;
   private readonly wakers = new Set<() => void>();
+  private sweepTimer: NodeJS.Timeout | null = null;
+  /** Camera -> when the sweep last opened an event, for SWEEP_COOLDOWN_MS. */
+  private readonly lastSweepMs = new Map<string, number>();
 
   constructor(private readonly deps: EventPipelineDeps) {}
 
@@ -164,12 +212,24 @@ export class EventPipeline {
     this.uploaderLoop = this.runUploader().catch((err) => {
       this.deps.log.error(`uploader crashed: ${err instanceof Error ? err.message : String(err)}`);
     });
+    this.sweepTimer = setInterval(() => {
+      void this.runSweep().catch((err) => {
+        this.deps.log.warn(
+          `detection sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref();
   }
 
   stop(): void {
     this.running = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     for (const open of this.open.values()) {
       if (open.closeTimer) clearTimeout(open.closeTimer);
       if (open.redetectTimer) clearTimeout(open.redetectTimer);
@@ -240,6 +300,78 @@ export class EventPipeline {
     }
   }
 
+  /* ---------- motion-independent sweep ---------- */
+
+  /**
+   * Look for animals on every recording camera, whether or not anything moved.
+   *
+   * Deliberately animals only. The sweep sees whatever is in frame, including
+   * things that are always in frame, so raising events for every kind would
+   * mean an event per interval for a permanently parked van — and on the
+   * Backyard camera, where a hedge scores as a person at 0.86, a person event
+   * every 30 seconds for ever. Motion already catches subjects large enough to
+   * trip it, which is essentially all vehicles and people; what it structurally
+   * cannot catch is the small distant animal, so that is what this adds.
+   *
+   * Cameras with record=false are skipped: their frames are not on disk, and
+   * falling back to go2rtc on a timer would rebuild the dependency that starved
+   * detection in the first place.
+   */
+  private async runSweep(): Promise<void> {
+    if (!this.running) return;
+    const now = Date.now();
+    for (const camera of this.deps.store.get().cameras) {
+      if (!camera.enabled || !camera.record) continue;
+      // Motion already owns this camera right now, and runDetect is running
+      // against the same frames — a sweep event would just duplicate it.
+      if (this.open.has(camera.id)) continue;
+      const last = this.lastSweepMs.get(camera.id) ?? 0;
+      if (now - last < SWEEP_COOLDOWN_MS) continue;
+
+      const jpeg = await this.deps.recorder.latestFrame(camera.id, SNAPSHOT_MAX_AGE_MS);
+      if (!jpeg) continue; // capture is down; nothing to look at
+      const zones = camera.zones ?? [];
+      const found = (await this.deps.detect.detect(jpeg))
+        .filter((d) => ANIMAL_KINDS.has(d.kind) && d.score >= minScoreFor(d.kind))
+        .filter((d) => detectionInZones(d, zones));
+      if (found.length === 0) continue;
+
+      const picked = pickKind(found);
+      if (!picked) continue;
+      this.lastSweepMs.set(camera.id, now);
+      const candidate: OpenEvent = {
+        id: randomUUID(),
+        cameraId: camera.id,
+        kind: picked.kind,
+        score: picked.score,
+        startedAtMs: now - SWEEP_EVENT_PAD_MS,
+        endedAtMs: now + SWEEP_EVENT_PAD_MS,
+        // No motion triggered this, so there is no changed fraction to report.
+        changedFraction: 0,
+        detections: found,
+        zoneIds: new Set(found.flatMap((d) => (d.box ? zoneIdsForBox(d.box, zones) : []))),
+        closeTimer: null,
+        redetectTimer: null,
+      };
+      this.open.set(camera.id, candidate);
+      this.deps.log.info(
+        `sweep found ${found
+          .map((d) => `${d.kind} ${(d.score * 100).toFixed(0)}%`)
+          .join(", ")} on camera ${camera.id} with no motion trigger — ` +
+          `event ${candidate.id} kind ${picked.kind} ${(picked.score * 100).toFixed(0)}%`,
+      );
+      candidate.closeTimer = setTimeout(() => {
+        this.open.delete(camera.id);
+        void this.close(candidate).catch((err) => {
+          this.deps.log.error(
+            `event ${candidate.id} close failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }, SWEEP_EVENT_PAD_MS + CLOSE_SLACK_MS);
+      candidate.closeTimer.unref();
+    }
+  }
+
   /**
    * Full-color JPEG for detection — the 320x180 grayscale motion frames are
    * unusable for object detection. Returns null on any failure (the event then
@@ -298,7 +430,7 @@ export class EventPipeline {
       const zones =
         this.deps.store.get().cameras.find((c) => c.id === candidate.cameraId)?.zones ?? [];
       const scored = (await this.deps.detect.detect(jpeg)).filter(
-        (d) => d.score >= MIN_DETECTION_SCORE,
+        (d) => d.score >= minScoreFor(d.kind),
       );
       const detections = scored.filter((d) => detectionInZones(d, zones));
       const dropped = scored.length - detections.length;
