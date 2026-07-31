@@ -20,6 +20,7 @@ import type { Logger } from "../log.js";
 import type { MotionDetector, MotionEvent } from "../motion/detector.js";
 import { detectionInZones, zoneIdsForBox } from "../motion/zones.js";
 import type { Recorder } from "../recorder/recorder.js";
+import { SceneryModel } from "./scenery.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -204,6 +205,8 @@ export class EventPipeline {
   private sweepTimer: NodeJS.Timeout | null = null;
   /** Camera -> when the sweep last opened an event, for SWEEP_COOLDOWN_MS. */
   private readonly lastSweepMs = new Map<string, number>();
+  /** Static false positives learned from the sweep (chiminea, hedge). */
+  private readonly scenery = new SceneryModel();
 
   constructor(private readonly deps: EventPipelineDeps) {}
 
@@ -331,7 +334,13 @@ export class EventPipeline {
       const jpeg = await this.deps.recorder.latestFrame(camera.id, SNAPSHOT_MAX_AGE_MS);
       if (!jpeg) continue; // capture is down; nothing to look at
       const zones = camera.zones ?? [];
-      const found = (await this.deps.detect.detect(jpeg))
+      const all = await this.deps.detect.detect(jpeg);
+      // Feed the scenery model everything, not just what the sweep acts on:
+      // an object only proves it is furniture by turning up in passes nobody
+      // cared about. This is the sweep's other job, and the reason the model
+      // gets a clean 30s heartbeat instead of only seeing motion events.
+      this.scenery.observe(camera.id, all, now);
+      const found = all
         .filter((d) => ANIMAL_KINDS.has(d.kind) && d.score >= minScoreFor(d.kind))
         .filter((d) => detectionInZones(d, zones));
       if (found.length === 0) continue;
@@ -429,9 +438,19 @@ export class EventPipeline {
       if (!jpeg) return;
       const zones =
         this.deps.store.get().cameras.find((c) => c.id === candidate.cameraId)?.zones ?? [];
-      const scored = (await this.deps.detect.detect(jpeg)).filter(
-        (d) => d.score >= minScoreFor(d.kind),
-      );
+      const now = Date.now();
+      const raw = await this.deps.detect.detect(jpeg);
+      // Drop the furniture first: objects the sweep has watched sit perfectly
+      // still for half an hour are not people, whatever the model scores them.
+      const live = raw.filter((d) => !this.scenery.isScenery(candidate.cameraId, d, now));
+      const furniture = raw.length - live.length;
+      if (furniture > 0) {
+        this.deps.log.info(
+          `event ${candidate.id}: ${furniture} detection(s) ignored as scenery — ` +
+            `${this.scenery.describe(candidate.cameraId, now).join("; ")}`,
+        );
+      }
+      const scored = live.filter((d) => d.score >= minScoreFor(d.kind));
       const detections = scored.filter((d) => detectionInZones(d, zones));
       const dropped = scored.length - detections.length;
       if (dropped > 0) {
