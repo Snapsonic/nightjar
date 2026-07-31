@@ -28,6 +28,16 @@ const PRE_ROLL_MS = 5_000;
 const POST_ROLL_MS = 5_000;
 /** go2rtc snapshot fetch budget — on timeout the event simply stays "motion". */
 const SNAPSHOT_TIMEOUT_MS = 2_000;
+/**
+ * How far back fetchSnapshot will reach for an on-disk frame.
+ *
+ * Bounded deliberately: the recorder writes continuously, so on a healthy
+ * camera the newest frame is seconds old and this never binds. It only matters
+ * when capture is down, and classifying a live event against footage from two
+ * minutes ago would be worse than not classifying it — so give up and let the
+ * go2rtc fallback try for something live.
+ */
+const SNAPSHOT_MAX_AGE_MS = 30_000;
 /** Detections below this score are discarded by the pipeline. */
 const MIN_DETECTION_SCORE = 0.5;
 /** One extra detection pass this long after motionStart (if still open). */
@@ -231,11 +241,34 @@ export class EventPipeline {
   }
 
   /**
-   * Full-color JPEG of the camera's live main stream via go2rtc — the
-   * 320x180 grayscale motion frames are unusable for object detection.
-   * Returns null on any failure (the event then simply stays "motion").
+   * Full-color JPEG for detection — the 320x180 grayscale motion frames are
+   * unusable for object detection. Returns null on any failure (the event then
+   * simply stays "motion").
+   *
+   * Read from the recorder's own segments first, and only ask go2rtc if that
+   * comes up empty. Asking go2rtc first is what this used to do, and it made
+   * detection depend on the one component that keeps breaking: when a Nest
+   * stream churns, go2rtc's producer goes cold and /api/frame.jpeg has to
+   * re-establish it, which measured at 3.5-4.5s against the 2s budget below.
+   * Every one of those timed out, so the event never got classified at all —
+   * for more than a day this node was recording fine while logging 20-70
+   * snapshot timeouts an hour and classifying almost nothing.
+   *
+   * The frames were on disk the whole time. Recorder.latestFrame reads the
+   * newest one already written, which costs no network call and cannot stall
+   * on a cold producer — the same reasoning that moved dashboard snapshots off
+   * that endpoint. go2rtc remains the fallback for cameras the recorder does
+   * not cover (record=false) or whose capture is currently down.
    */
   private async fetchSnapshot(cameraId: string): Promise<Buffer | null> {
+    try {
+      const frame = await this.deps.recorder.latestFrame(cameraId, SNAPSHOT_MAX_AGE_MS);
+      if (frame) return frame;
+    } catch (err) {
+      this.deps.log.warn(
+        `detect snapshot for camera ${cameraId} from segments failed: ${err instanceof Error ? err.message : String(err)} — trying go2rtc`,
+      );
+    }
     const apiUrl = this.deps.store.get().go2rtc.apiUrl.replace(/\/+$/, "");
     const src = encodeURIComponent(go2rtcStreamName(cameraId));
     try {

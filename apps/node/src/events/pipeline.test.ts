@@ -278,3 +278,94 @@ describe("pickKind", () => {
     assert.equal(pickKind([]), null);
   });
 });
+
+describe("detection snapshots", () => {
+  const makeWith = (recorder: unknown, root: string) =>
+    new EventPipeline({
+      db: new NodeDb(path.join(root, "db2")),
+      link: { getClient: () => null, getNodeId: () => NODE_ID } as unknown as CloudLink,
+      recorder: recorder as never,
+      detect: {} as never,
+      store: new ConfigStore(silentLog, path.join(root, "config")),
+      log: silentLog,
+    });
+  // fetchSnapshot is private; the point of these tests is which source it
+  // reaches for, which is exactly what callers cannot observe.
+  const snapshot = (p: EventPipeline, cameraId: string) =>
+    (p as unknown as { fetchSnapshot(id: string): Promise<Buffer | null> }).fetchSnapshot(cameraId);
+
+  it("takes the frame from recorded segments without calling go2rtc", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "nightjar-snap-"));
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: unknown) => {
+      calls.push(String(url));
+      throw new Error("go2rtc must not be reached when the frame is already on disk");
+    }) as typeof fetch;
+    try {
+      const asked: number[] = [];
+      const pipeline = makeWith(
+        {
+          latestFrame: async (_id: string, maxAgeMs: number) => {
+            asked.push(maxAgeMs);
+            return Buffer.from("segment-jpeg");
+          },
+        },
+        root,
+      );
+      const frame = await snapshot(pipeline, "cam-1");
+      assert.equal(frame?.toString(), "segment-jpeg");
+      assert.deepEqual(calls, []);
+      // Bounded, so a live event is never classified against stale footage.
+      assert.deepEqual(asked, [30_000]);
+    } finally {
+      globalThis.fetch = realFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to go2rtc when no recent segment exists (record=false, or capture down)", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "nightjar-snap-"));
+    const realFetch = globalThis.fetch;
+    let asked = "";
+    globalThis.fetch = (async (url: unknown) => {
+      asked = String(url);
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const pipeline = makeWith({ latestFrame: async () => null }, root);
+      const frame = await snapshot(pipeline, "cam-1");
+      assert.equal(frame?.length, 3);
+      assert.ok(asked.includes("/api/frame.jpeg"), `expected go2rtc call, got ${asked}`);
+    } finally {
+      globalThis.fetch = realFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still tries go2rtc when reading the segment throws", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "nightjar-snap-"));
+    const realFetch = globalThis.fetch;
+    let reached = false;
+    globalThis.fetch = (async () => {
+      reached = true;
+      return new Response(new Uint8Array([9]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const pipeline = makeWith(
+        {
+          latestFrame: async () => {
+            throw new Error("recordings volume unavailable");
+          },
+        },
+        root,
+      );
+      const frame = await snapshot(pipeline, "cam-1");
+      assert.ok(reached);
+      assert.equal(frame?.length, 1);
+    } finally {
+      globalThis.fetch = realFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
