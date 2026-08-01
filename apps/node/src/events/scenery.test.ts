@@ -108,3 +108,71 @@ describe("SceneryModel", () => {
     assert.equal(model.isScenery(CAM, hedge, t), false);
   });
 });
+
+describe("SceneryModel — flickering objects (the porch railing)", () => {
+  /** The real Driveway 2 box that produced three "person" events in 25 min. */
+  const RAILING: [number, number, number, number] = [0.0006, 0.6724, 0.2887, 0.325];
+
+  it("learns a railing the detector only notices some of the time", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    // Eight hours of sweeps; the railing crosses the score threshold in only
+    // one pass out of six, so presence never comes close to 90%.
+    for (let i = 0; i < 960; i++) {
+      model.observe(CAM, i % 6 === 0 ? [det("person", RAILING, 0.53)] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", RAILING, 0.53), t), true);
+    assert.match(model.describe(CAM, t)[0] ?? "", /recurrent/);
+  });
+
+  it("is not fooled by a person who keeps returning to roughly one spot", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    // Someone at the front door many times over eight hours, standing a little
+    // differently each time — overlapping enough to be one track, never exact.
+    for (let i = 0; i < 960; i++) {
+      if (i % 6 === 0) {
+        const jitter = ((i / 6) % 5) * 0.02;
+        model.observe(CAM, [det("person", [0.3 + jitter, 0.4 + jitter, 0.12, 0.3])], t);
+      } else {
+        model.observe(CAM, [], t);
+      }
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", [0.3, 0.4, 0.12, 0.3]), t), false);
+  });
+
+  it("needs hours, not minutes, before the recurrence rule applies", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    // 50 tight hits, but crammed into one hour.
+    for (let i = 0; i < 120; i++) {
+      model.observe(CAM, i % 2 === 0 ? [det("person", RAILING)] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", RAILING), t), false);
+  });
+
+  it("still refuses to suppress animals however often they recur", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 960; i++) {
+      model.observe(CAM, [det("cat", [0.5, 0.5, 0.05, 0.1], 0.6)], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("cat", [0.5, 0.5, 0.05, 0.1], 0.6), t), false);
+  });
+
+  it("forgets a recurrent track once it is really gone", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 960; i++) {
+      model.observe(CAM, i % 6 === 0 ? [det("person", RAILING)] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", RAILING), t), true);
+    // Railing removed: nothing matches it for over an hour.
+    assert.equal(model.isScenery(CAM, det("person", RAILING), t + 61 * 60_000), false);
+  });
+});
