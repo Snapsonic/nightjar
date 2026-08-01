@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { CameraCapabilities, Zone } from "@nightjar/shared";
+import { CameraNotifications } from "@/components/camera-notifications";
 import { LivePlayer } from "@/components/live-player";
 import { ZoneEditor } from "@/components/zone-editor";
 import { NodeStatusBadge } from "@/components/status-badge";
@@ -63,6 +64,22 @@ export default async function LivePage({
 
   const online = node ? isNodeOnline(toNodeStatus(node.status), node.last_seen_at) : false;
 
+  // Both notification rows in one round trip: this camera's override, if it has
+  // one, and the global row it otherwise inherits. Absence of the camera row is
+  // what "inherit" means, so it is not an error.
+  const { data: { user } = { user: null } } = await supabase.auth.getUser();
+  const { data: settingsRows } = user
+    ? await supabase
+        .from("notification_settings")
+        .select("camera_id, kinds, channels")
+        .eq("user_id", user.id)
+        .or(`camera_id.eq.${cameraId},camera_id.is.null`)
+    : { data: null };
+  const cameraKinds = settingsRows?.find((r) => r.camera_id === cameraId)?.kinds ?? null;
+  const globalRow = settingsRows?.find((r) => r.camera_id === null);
+  const globalKinds = globalRow?.kinds ?? ["person", "package"];
+  const globalChannels = globalRow?.channels ?? null;
+
   // The node syncs CameraPublic.capabilities into the jsonb column; tolerate
   // rows written by older node builds (fields are additive with defaults).
   const parsedCapabilities = CameraCapabilities.safeParse(camera.capabilities ?? {});
@@ -112,6 +129,17 @@ export default async function LivePage({
         nodeOnline={online}
         initialZones={zones}
       />
+
+      {user && (
+        <CameraNotifications
+          userId={user.id}
+          cameraId={camera.id}
+          cameraName={camera.name}
+          globalKinds={globalKinds}
+          globalChannels={globalChannels}
+          initialKinds={cameraKinds}
+        />
+      )}
 
       <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} autoFocus={historyTab} />
     </>

@@ -107,7 +107,7 @@ export function PlanCard({ plan }: { plan: "free" | "plus" | "pro" }) {
 
 /* ---------- notification toggles ---------- */
 
-const KIND_LABELS: Record<EventKind, string> = {
+export const KIND_LABELS: Record<EventKind, string> = {
   motion: "Motion",
   person: "Person",
   vehicle: "Vehicle",
@@ -117,6 +117,42 @@ const KIND_LABELS: Record<EventKind, string> = {
   package: "Package",
   bear: "Bear",
 };
+
+/** One kind row. Shared so the per-camera card cannot drift from this one. */
+export function KindSwitch({
+  kind,
+  on,
+  disabled,
+  onToggle,
+}: {
+  kind: EventKind;
+  on: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center justify-between rounded-lg border border-night-600 bg-night-800 px-3.5 py-2.5">
+      <span className="text-sm text-fog-200">{KIND_LABELS[kind]}</span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={`Notify on ${KIND_LABELS[kind].toLowerCase()}`}
+        disabled={disabled}
+        onClick={onToggle}
+        className={`relative h-6 w-11 rounded-full transition-colors disabled:opacity-60 ${
+          on ? "bg-ember-500" : "bg-night-500"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-night-950 transition-all ${
+            on ? "left-[22px]" : "left-0.5"
+          }`}
+        />
+      </button>
+    </label>
+  );
+}
 
 export function NotificationToggles({
   userId,
