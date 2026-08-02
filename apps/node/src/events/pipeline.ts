@@ -20,7 +20,7 @@ import type { Logger } from "../log.js";
 import type { MotionDetector, MotionEvent } from "../motion/detector.js";
 import { detectionInZones, zoneIdsForBox } from "../motion/zones.js";
 import type { Recorder } from "../recorder/recorder.js";
-import { SceneryModel } from "./scenery.js";
+import { boxIou, SceneryModel } from "./scenery.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +88,24 @@ const SWEEP_INTERVAL_MS = 30_000;
 const SWEEP_COOLDOWN_MS = 5 * 60_000;
 /** Footage either side of a sweep detection, which is an instant, not a span. */
 const SWEEP_EVENT_PAD_MS = 5_000;
+/**
+ * How much an animal must move before it counts as news again.
+ *
+ * The cooldown alone only rate-limits: a cat asleep on the windowsill still
+ * produced an event every five minutes for as long as it stayed there — 91 of
+ * 96 cat events in one day came from one resident cat on one indoor-facing
+ * camera, every single detection correct and none of them worth an alert.
+ * "Still there" is not the same news as "arrived", so a subject whose box has
+ * not moved since the last sweep event does not open another one.
+ */
+const SWEEP_STILL_IOU = 0.5;
+/**
+ * Stop tracking a subject once nothing animal-shaped has been seen this long.
+ *
+ * After that a detection is a fresh arrival rather than the same animal, and
+ * is allowed to alert again even if it settles in the same favourite spot.
+ */
+const SWEEP_ABSENT_MS = 10 * 60_000;
 /** Event kind priority — higher wins, but only from close enough behind (see pickKind). */
 const KIND_PRIORITY: Record<EventKind, number> = {
   person: 5,
@@ -205,6 +223,15 @@ export class EventPipeline {
   private sweepTimer: NodeJS.Timeout | null = null;
   /** Camera -> when the sweep last opened an event, for SWEEP_COOLDOWN_MS. */
   private readonly lastSweepMs = new Map<string, number>();
+  /**
+   * Camera -> the subject the sweep is currently watching: where it was when it
+   * last alerted, and when it was last seen at all. Lets a settled animal stay
+   * one event instead of becoming one every cooldown.
+   */
+  private readonly sweepSubject = new Map<
+    string,
+    { boxes: readonly (readonly number[])[]; lastSeenMs: number }
+  >();
   /** Static false positives learned from the sweep (chiminea, hedge). */
   private readonly scenery = new SceneryModel();
 
@@ -347,6 +374,21 @@ export class EventPipeline {
 
       const picked = pickKind(found);
       if (!picked) continue;
+
+      // Same animal, same place, still there — not news. Only refresh how
+      // recently it was seen, so it keeps holding its slot without alerting.
+      const boxes = found.flatMap((d) => (d.box ? [d.box as readonly number[]] : []));
+      const subject = this.sweepSubject.get(camera.id);
+      const settled =
+        subject !== undefined &&
+        now - subject.lastSeenMs < SWEEP_ABSENT_MS &&
+        boxes.length > 0 &&
+        boxes.every((b) => subject.boxes.some((prev) => boxIou(prev, b) >= SWEEP_STILL_IOU));
+      if (settled) {
+        subject.lastSeenMs = now;
+        continue;
+      }
+      this.sweepSubject.set(camera.id, { boxes, lastSeenMs: now });
       this.lastSweepMs.set(camera.id, now);
       const candidate: OpenEvent = {
         id: randomUUID(),

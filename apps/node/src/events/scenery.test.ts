@@ -176,3 +176,31 @@ describe("SceneryModel — flickering objects (the porch railing)", () => {
     assert.equal(model.isScenery(CAM, det("person", RAILING), t + 61 * 60_000), false);
   });
 });
+
+describe("SceneryModel — cross-kind suppression", () => {
+  const CORNER: [number, number, number, number] = [0.0006, 0.6724, 0.2887, 0.325];
+
+  it("a qualified vehicle track suppresses a person at the same exact box", () => {
+    // The real Driveway 2 failure: the detector called that corner a vehicle
+    // 244 times and a person occasionally, so the person track never qualified
+    // on its own and the phantom kept firing.
+    const model = new SceneryModel();
+    const t = soak(model, [det("vehicle", CORNER)], 61);
+    assert.equal(model.isScenery(CAM, det("person", CORNER, 0.53), t), true);
+  });
+
+  it("does not suppress a different kind merely overlapping the same area", () => {
+    // A person in front of a parked car overlaps it but is much smaller — the
+    // cross-kind bar is near-identical pixels, not shared ground.
+    const model = new SceneryModel();
+    const car: [number, number, number, number] = [0.2, 0.2, 0.5, 0.6];
+    const t = soak(model, [det("vehicle", car)], 61);
+    assert.equal(model.isScenery(CAM, det("person", [0.3, 0.45, 0.1, 0.35], 0.8), t), false);
+  });
+
+  it("cross-kind still never reaches animals", () => {
+    const model = new SceneryModel();
+    const t = soak(model, [det("vehicle", CORNER)], 61);
+    assert.equal(model.isScenery(CAM, det("cat", CORNER, 0.6), t), false);
+  });
+});

@@ -482,3 +482,99 @@ describe("motion-independent sweep", () => {
     }
   });
 });
+
+describe("sweep — a settled animal is one event, not many", () => {
+  const CAM2 = "37947fc4-fc23-46e8-bc7e-783fba1c50de";
+  const at = (box: number[], kind = "cat", score = 0.6) =>
+    ({ kind, score, box, atMs: 0 }) as never;
+
+  function makeSweeper(detectionsRef: { current: unknown[] }) {
+    const root = mkdtempSync(path.join(tmpdir(), "nightjar-still-"));
+    const store = new ConfigStore(silentLog, path.join(root, "config"));
+    store.update({
+      cameras: [
+        {
+          id: CAM2,
+          name: "Window",
+          enabled: true,
+          record: true,
+          source: "nest",
+          nest: { deviceId: "enterprises/p/devices/d" },
+        },
+      ] as never,
+    });
+    const pipeline = new EventPipeline({
+      db: new NodeDb(path.join(root, "db")),
+      link: { getClient: () => null, getNodeId: () => NODE_ID } as unknown as CloudLink,
+      recorder: { latestFrame: async () => Buffer.from("jpeg") } as never,
+      detect: { detect: async () => detectionsRef.current } as never,
+      store,
+      log: silentLog,
+    });
+    const inner = pipeline as unknown as {
+      open: Map<string, unknown>;
+      lastSweepMs: Map<string, number>;
+      runSweep(): Promise<void>;
+    };
+    return { pipeline, inner, root };
+  }
+
+  it("does not re-open an event while the cat stays put", async () => {
+    const ref = { current: [at([0.0, 0.0, 0.23, 0.97])] };
+    const fx = makeSweeper(ref);
+    try {
+      await fx.inner.runSweep();
+      assert.ok(fx.inner.open.get(CAM2), "first sighting should alert");
+
+      // Event closes; cooldown lapses; the cat has not moved.
+      fx.inner.open.delete(CAM2);
+      const aged = Date.now() - 6 * 60_000;
+      fx.inner.lastSweepMs.set(CAM2, aged);
+      await fx.inner.runSweep();
+      assert.equal(fx.inner.open.get(CAM2), undefined, "still there is not news");
+      // The alert clock is untouched, so this really skipped rather than
+      // opening and closing an event behind our back.
+      assert.equal(fx.inner.lastSweepMs.get(CAM2), aged);
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("alerts again once the cat actually moves", async () => {
+    const ref = { current: [at([0.0, 0.0, 0.23, 0.97])] };
+    const fx = makeSweeper(ref);
+    try {
+      await fx.inner.runSweep();
+      fx.inner.open.delete(CAM2);
+      fx.inner.lastSweepMs.set(CAM2, Date.now() - 6 * 60_000);
+      // Across the room — nothing like the previous box.
+      ref.current = [at([0.7, 0.55, 0.09, 0.12])];
+      await fx.inner.runSweep();
+      assert.ok(fx.inner.open.get(CAM2), "movement is news again");
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a return after a long absence as a fresh arrival", async () => {
+    const ref = { current: [at([0.0, 0.0, 0.23, 0.97])] };
+    const fx = makeSweeper(ref);
+    try {
+      await fx.inner.runSweep();
+      fx.inner.open.delete(CAM2);
+      fx.inner.lastSweepMs.set(CAM2, Date.now() - 6 * 60_000);
+      // Age the remembered subject past SWEEP_ABSENT_MS.
+      const subject = (
+        fx.pipeline as unknown as { sweepSubject: Map<string, { lastSeenMs: number }> }
+      ).sweepSubject.get(CAM2);
+      if (subject) subject.lastSeenMs = Date.now() - 11 * 60_000;
+      await fx.inner.runSweep();
+      assert.ok(fx.inner.open.get(CAM2), "coming back is a new visit");
+    } finally {
+      fx.pipeline.stop();
+      rmSync(fx.root, { recursive: true, force: true });
+    }
+  });
+});

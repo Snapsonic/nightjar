@@ -55,6 +55,21 @@ const RECURRENT_MIN_TIGHT = 50;
 const RECURRENT_MIN_AGE_MS = 6 * 3_600_000;
 /** Established tracks survive longer gaps, since flickering is the whole point. */
 const RECURRENT_FORGET_MS = 60 * 60_000;
+/**
+ * Overlap required before a track suppresses a DIFFERENT kind at its location.
+ *
+ * The porch railing on Driveway 2 is the case for this. The detector cannot
+ * make up its mind about that corner: it calls it a vehicle most of the time
+ * and a person occasionally, so the vehicle track reached 244 exact hits over
+ * 399 minutes while the person track — keyed separately by kind — never
+ * accumulated enough to qualify and the phantom kept firing. Splitting the
+ * evidence by label was wrong when the label is the thing being got wrong.
+ *
+ * Cross-kind is a stronger claim than same-kind, so it needs a much tighter
+ * box: essentially the same pixels, not merely the same area. A person walking
+ * in front of a parked car has a far smaller box and does not match it.
+ */
+const CROSS_KIND_IOU = 0.85;
 /** Only these kinds are ever suppressed; animals are the thing we are hunting. */
 const SUPPRESSIBLE: ReadonlySet<EventKind> = new Set<EventKind>(["person", "vehicle", "package"]);
 
@@ -70,7 +85,7 @@ interface Track {
   lastMs: number;
 }
 
-function iou(a: readonly number[], b: readonly number[]): number {
+export function boxIou(a: readonly number[], b: readonly number[]): number {
   const ax2 = a[0]! + a[2]!;
   const ay2 = a[1]! + a[3]!;
   const bx2 = b[0]! + b[2]!;
@@ -101,12 +116,12 @@ export class SceneryModel {
       if (!SUPPRESSIBLE.has(detection.kind) || !detection.box) continue;
       const box = detection.box as [number, number, number, number];
       const hit = existing.find(
-        (t) => t.kind === detection.kind && !matched.has(t) && iou(t.box, box) >= SCENERY_IOU,
+        (t) => t.kind === detection.kind && !matched.has(t) && boxIou(t.box, box) >= SCENERY_IOU,
       );
       if (hit) {
         matched.add(hit);
         hit.seen++;
-        if (iou(hit.box, box) >= RECURRENT_IOU) hit.tight++;
+        if (boxIou(hit.box, box) >= RECURRENT_IOU) hit.tight++;
         hit.lastMs = nowMs;
         // Ease the stored box toward the observation so slow drift (a chair
         // nudged, the sun moving a shadow) does not split one object in two.
@@ -164,8 +179,10 @@ export class SceneryModel {
   isScenery(cameraId: string, detection: Detection, nowMs: number): boolean {
     if (!SUPPRESSIBLE.has(detection.kind) || !detection.box) return false;
     for (const track of this.tracks.get(cameraId) ?? []) {
-      if (track.kind !== detection.kind) continue;
-      if (iou(track.box, detection.box) < SCENERY_IOU) continue;
+      // A qualified track suppresses its own kind over the usual overlap, and
+      // any other suppressible kind only where the boxes are all but identical.
+      const need = track.kind === detection.kind ? SCENERY_IOU : CROSS_KIND_IOU;
+      if (boxIou(track.box, detection.box) < need) continue;
       if (this.qualifies(track, nowMs) !== null) return true;
     }
     return false;
