@@ -204,3 +204,56 @@ describe("SceneryModel — cross-kind suppression", () => {
     assert.equal(model.isScenery(CAM, det("cat", CORNER, 0.6), t), false);
   });
 });
+
+describe("SceneryModel — surviving a restart", () => {
+  it("a learned track still suppresses after export/import", () => {
+    // The point of persisting: the model needs 30 minutes to call something
+    // furniture, which is longer than the gap between two deploys, so in
+    // memory alone it never finished learning.
+    const before = new SceneryModel();
+    const hedge = det("person", HEDGE);
+    const t = soak(before, [hedge], 61);
+    assert.equal(before.isScenery(CAM, hedge, t), true);
+
+    const after = new SceneryModel();
+    after.import(before.export());
+    assert.equal(after.isScenery(CAM, hedge, t), true);
+  });
+
+  it("round-trips the counters the recurrence rule depends on", () => {
+    const before = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 960; i++) {
+      before.observe(CAM, i % 6 === 0 ? [det("person", HEDGE)] : [], t);
+      t += SWEEP;
+    }
+    const after = new SceneryModel();
+    after.import(before.export());
+    assert.deepEqual(after.describe(CAM, t), before.describe(CAM, t));
+    assert.match(after.describe(CAM, t)[0] ?? "", /recurrent/);
+  });
+
+  it("a model restored after a long outage suppresses nothing", () => {
+    const before = new SceneryModel();
+    const hedge = det("person", HEDGE);
+    const t = soak(before, [hedge], 61);
+    const after = new SceneryModel();
+    after.import(before.export());
+    // Two hours later nothing has re-confirmed it; the view may have changed.
+    assert.equal(after.isScenery(CAM, hedge, t + 2 * 3_600_000), false);
+  });
+
+  it("keeps learning from where it left off", () => {
+    const before = new SceneryModel();
+    let t = soak(before, [det("person", HEDGE)], 30); // not yet qualified
+    assert.equal(before.isScenery(CAM, det("person", HEDGE), t), false);
+
+    const after = new SceneryModel();
+    after.import(before.export());
+    for (let i = 0; i < 31; i++) {
+      after.observe(CAM, [det("person", HEDGE)], t);
+      t += SWEEP;
+    }
+    assert.equal(after.isScenery(CAM, det("person", HEDGE), t), true);
+  });
+});

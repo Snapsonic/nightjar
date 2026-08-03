@@ -181,3 +181,35 @@ test("isStreamMissingTail ignores unrelated capture failures", () => {
   assert.ok(!isStreamMissingTail("Connection timed out"));
   assert.ok(!isStreamMissingTail(""));
 });
+
+test("scenery tracks survive a database reopen", () => {
+  const { db, dir } = scratchDb();
+  try {
+    assert.deepEqual(db.loadSceneryTracks(), []);
+    db.saveSceneryTracks([
+      {
+        camera_id: CAMERA_ID,
+        kind: "person",
+        x: 0.704, y: 0.002, w: 0.114, h: 0.577,
+        seen: 244, missed: 509, tight: 244,
+        first_ms: 1_000_000, last_ms: 1_400_000,
+      },
+    ]);
+    const reopened = new NodeDb(dir);
+    try {
+      const rows = reopened.loadSceneryTracks();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.tight, 244);
+      assert.equal(rows[0]?.x, 0.704);
+      assert.equal(rows[0]?.kind, "person");
+    } finally {
+      reopened.close();
+    }
+    // Saving replaces wholesale — the model is the authority on what exists.
+    db.saveSceneryTracks([]);
+    assert.deepEqual(db.loadSceneryTracks(), []);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -106,6 +106,13 @@ const SWEEP_STILL_IOU = 0.5;
  * is allowed to alert again even if it settles in the same favourite spot.
  */
 const SWEEP_ABSENT_MS = 10 * 60_000;
+/**
+ * How often the learned scenery is written back to SQLite.
+ *
+ * Cheap (a handful of rows), and it only has to be recent enough that an
+ * unplanned exit loses minutes of observation rather than hours.
+ */
+const SCENERY_SAVE_INTERVAL_MS = 5 * 60_000;
 /** Event kind priority — higher wins, but only from close enough behind (see pickKind). */
 const KIND_PRIORITY: Record<EventKind, number> = {
   person: 5,
@@ -221,6 +228,7 @@ export class EventPipeline {
   private uploaderLoop: Promise<void> | null = null;
   private readonly wakers = new Set<() => void>();
   private sweepTimer: NodeJS.Timeout | null = null;
+  private sceneryTimer: NodeJS.Timeout | null = null;
   /** Camera -> when the sweep last opened an event, for SWEEP_COOLDOWN_MS. */
   private readonly lastSweepMs = new Map<string, number>();
   /**
@@ -242,6 +250,18 @@ export class EventPipeline {
     this.uploaderLoop = this.runUploader().catch((err) => {
       this.deps.log.error(`uploader crashed: ${err instanceof Error ? err.message : String(err)}`);
     });
+    // Restore what previous runs learned. Stale rows are harmless: qualifies()
+    // measures every track against the current clock, so a model restored after
+    // a long outage suppresses nothing until it has watched again.
+    try {
+      this.scenery.import(this.deps.db.loadSceneryTracks());
+    } catch (err) {
+      this.deps.log.warn(
+        `could not restore learned scenery: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.sceneryTimer = setInterval(() => this.saveScenery(), SCENERY_SAVE_INTERVAL_MS);
+    this.sceneryTimer.unref();
     this.sweepTimer = setInterval(() => {
       void this.runSweep().catch((err) => {
         this.deps.log.warn(
@@ -260,6 +280,13 @@ export class EventPipeline {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    if (this.sceneryTimer) {
+      clearInterval(this.sceneryTimer);
+      this.sceneryTimer = null;
+    }
+    // A clean shutdown is the common case (deploys), so do not make it wait
+    // for the next interval to keep what it just learned.
+    this.saveScenery();
     for (const open of this.open.values()) {
       if (open.closeTimer) clearTimeout(open.closeTimer);
       if (open.redetectTimer) clearTimeout(open.redetectTimer);
@@ -327,6 +354,17 @@ export class EventPipeline {
           );
         });
       }, POST_ROLL_MS + CLOSE_SLACK_MS);
+    }
+  }
+
+  /** Persist learned scenery; never fatal, the model just relearns. */
+  private saveScenery(): void {
+    try {
+      this.deps.db.saveSceneryTracks(this.scenery.export());
+    } catch (err) {
+      this.deps.log.warn(
+        `could not save learned scenery: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

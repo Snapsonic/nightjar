@@ -1,4 +1,5 @@
 import type { Detection, EventKind } from "@nightjar/shared";
+import type { SceneryTrackRow } from "../db.js";
 
 /**
  * Learns the false positives that are part of the furniture.
@@ -186,6 +187,54 @@ export class SceneryModel {
       if (this.qualifies(track, nowMs) !== null) return true;
     }
     return false;
+  }
+
+  /**
+   * Everything learned so far, flat, for storage.
+   *
+   * Timestamps go out as they are. On the way back in they are compared
+   * against the clock as usual, so a model restored after a long outage simply
+   * reads as stale and suppresses nothing until it has watched again — which
+   * is the honest answer, since the view may well have changed.
+   */
+  export(): SceneryTrackRow[] {
+    const rows: SceneryTrackRow[] = [];
+    for (const [cameraId, tracks] of this.tracks) {
+      for (const t of tracks) {
+        rows.push({
+          camera_id: cameraId,
+          kind: t.kind,
+          x: t.box[0],
+          y: t.box[1],
+          w: t.box[2],
+          h: t.box[3],
+          seen: t.seen,
+          missed: t.missed,
+          tight: t.tight,
+          first_ms: t.firstMs,
+          last_ms: t.lastMs,
+        });
+      }
+    }
+    return rows;
+  }
+
+  /** Replace the model with stored rows (startup). */
+  import(rows: readonly SceneryTrackRow[]): void {
+    this.tracks.clear();
+    for (const r of rows) {
+      const list = this.tracks.get(r.camera_id) ?? [];
+      list.push({
+        kind: r.kind as EventKind,
+        box: [r.x, r.y, r.w, r.h],
+        seen: r.seen,
+        missed: r.missed,
+        tight: r.tight,
+        firstMs: r.first_ms,
+        lastMs: r.last_ms,
+      });
+      this.tracks.set(r.camera_id, list);
+    }
   }
 
   /** Drop everything known about a camera (config change, camera removed). */

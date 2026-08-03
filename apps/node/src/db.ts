@@ -27,6 +27,20 @@ export interface GdriveQueueRow {
   created_at: number;
 }
 
+export interface SceneryTrackRow {
+  camera_id: string;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  seen: number;
+  missed: number;
+  tight: number;
+  first_ms: number;
+  last_ms: number;
+}
+
 export interface EventRow {
   id: string;
   camera_id: string;
@@ -145,6 +159,28 @@ export class NodeDb {
       this.db.exec(`ALTER TABLE events ADD COLUMN drive_url TEXT;`);
       this.db.pragma("user_version = 3");
     }
+    if (version < 4) {
+      // Learned static false positives, so a node restart does not throw away
+      // hours of observation. The model needs 30 minutes to call something
+      // furniture and six hours for the intermittent case, which is longer
+      // than the gap between two deploys — in memory alone it never finished
+      // learning. Keyed by camera; rows are rewritten wholesale.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS scenery_tracks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          camera_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+          seen INTEGER NOT NULL,
+          missed INTEGER NOT NULL,
+          tight INTEGER NOT NULL,
+          first_ms INTEGER NOT NULL,
+          last_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scenery_camera ON scenery_tracks (camera_id);
+      `);
+      this.db.pragma("user_version = 4");
+    }
   }
 
   /** Remember the Drive share URL captured for an event's clip. */
@@ -261,6 +297,40 @@ export class NodeDb {
       )
       .get(nowMs, t1Ms, t0Ms, cameraId, t1Ms, t0Ms) as { ms: number };
     return Math.max(0, row.ms);
+  }
+
+  /* ---------- learned scenery (see events/scenery.ts) ---------- */
+
+  loadSceneryTracks(): SceneryTrackRow[] {
+    return this.db
+      .prepare(
+        `SELECT camera_id, kind, x, y, w, h, seen, missed, tight, first_ms, last_ms
+         FROM scenery_tracks`,
+      )
+      .all() as SceneryTrackRow[];
+  }
+
+  /**
+   * Replace every stored track in one transaction.
+   *
+   * Rewritten wholesale rather than diffed: there are only a handful of tracks
+   * per camera, and the model is the authority on which of them still exist.
+   */
+  saveSceneryTracks(rows: readonly SceneryTrackRow[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO scenery_tracks
+         (camera_id, kind, x, y, w, h, seen, missed, tight, first_ms, last_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const replaceAll = this.db.transaction((all: readonly SceneryTrackRow[]) => {
+      this.db.prepare("DELETE FROM scenery_tracks").run();
+      for (const r of all) {
+        insert.run(
+          r.camera_id, r.kind, r.x, r.y, r.w, r.h, r.seen, r.missed, r.tight, r.first_ms, r.last_ms,
+        );
+      }
+    });
+    this.write(() => replaceAll(rows));
   }
 
   insertEvent(event: NvrEvent): void {
