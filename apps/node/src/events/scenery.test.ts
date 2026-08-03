@@ -55,15 +55,17 @@ describe("SceneryModel", () => {
     assert.equal(model.isScenery(CAM, det("person", [0.4, 0.3, 0.08, 0.35]), t), false);
   });
 
-  it("never suppresses someone who is merely often present", () => {
+  it("never suppresses someone often present who is actually moving", () => {
     const model = new SceneryModel();
     let t = 1_000_000;
-    // Present in 3 of every 4 sweeps for two hours — well short of furniture.
+    // Present in 3 of every 4 sweeps for two hours, shifting a little each
+    // time. Frequency is not the test — a person is never pixel-identical.
     for (let i = 0; i < 240; i++) {
-      model.observe(CAM, i % 4 === 3 ? [] : [det("person", HEDGE)], t);
+      const j = (i % 9) * 0.01;
+      model.observe(CAM, i % 4 === 3 ? [] : [det("person", [0.3 + j, 0.35 + j, 0.1, 0.3])], t);
       t += SWEEP;
     }
-    assert.equal(model.isScenery(CAM, det("person", HEDGE), t), false);
+    assert.equal(model.isScenery(CAM, det("person", [0.3, 0.35, 0.1, 0.3]), t), false);
   });
 
   it("a real person standing in front of the hedge is still suppressed there", () => {
@@ -143,11 +145,11 @@ describe("SceneryModel — flickering objects (the porch railing)", () => {
     assert.equal(model.isScenery(CAM, det("person", [0.3, 0.4, 0.12, 0.3]), t), false);
   });
 
-  it("needs hours, not minutes, before the recurrence rule applies", () => {
+  it("needs sustained evidence, not one dense burst", () => {
     const model = new SceneryModel();
     let t = 1_000_000;
-    // 50 tight hits, but crammed into one hour.
-    for (let i = 0; i < 120; i++) {
+    // 40 tight hits crammed into forty minutes — under every age floor.
+    for (let i = 0; i < 80; i++) {
       model.observe(CAM, i % 2 === 0 ? [det("person", RAILING)] : [], t);
       t += SWEEP;
     }
@@ -255,5 +257,53 @@ describe("SceneryModel — surviving a restart", () => {
       t += SWEEP;
     }
     assert.equal(after.isScenery(CAM, det("person", HEDGE), t), true);
+  });
+});
+
+describe("SceneryModel — rigid position (the Driveway phantom)", () => {
+  /** The real box, which fired three person alerts in nine minutes. */
+  const PHANTOM: [number, number, number, number] = [0.639, 0.453, 0.03, 0.08];
+
+  it("suppresses an object seen only sometimes but always in the same pixels", () => {
+    // Reproduces the live counters exactly: 63 sightings across 83 minutes,
+    // every one of them tight, presence only 42%.
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 151; i++) {
+      model.observe(CAM, i % 12 < 5 ? [det("person", PHANTOM, 0.58)] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", PHANTOM, 0.58), t), true);
+    assert.match(model.describe(CAM, t)[0] ?? "", /rigid/);
+  });
+
+  it("is not fooled by someone detected often in slightly different places", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 151; i++) {
+      // Same doorway, never the same stance — overlapping enough to stay one
+      // track, never tight enough to look rigid.
+      const j = (i % 7) * 0.012;
+      model.observe(CAM, i % 12 < 5 ? [det("person", [0.3 + j, 0.4 + j, 0.12, 0.3])] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("person", [0.3, 0.4, 0.12, 0.3]), t), false);
+  });
+
+  it("needs more than a brief burst, however identical", () => {
+    const model = new SceneryModel();
+    // 40 tight sightings inside twenty minutes.
+    const t = soak(model, [det("person", PHANTOM)], 41);
+    assert.equal(model.isScenery(CAM, det("person", PHANTOM), t), false);
+  });
+
+  it("still exempts animals", () => {
+    const model = new SceneryModel();
+    let t = 1_000_000;
+    for (let i = 0; i < 151; i++) {
+      model.observe(CAM, i % 12 < 5 ? [det("cat", PHANTOM, 0.6)] : [], t);
+      t += SWEEP;
+    }
+    assert.equal(model.isScenery(CAM, det("cat", PHANTOM, 0.6), t), false);
   });
 });

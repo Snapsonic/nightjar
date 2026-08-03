@@ -57,6 +57,29 @@ const RECURRENT_MIN_AGE_MS = 6 * 3_600_000;
 /** Established tracks survive longer gaps, since flickering is the whole point. */
 const RECURRENT_FORGET_MS = 60 * 60_000;
 /**
+ * The fastest route: not how often it is seen, but how identically.
+ *
+ * The Driveway phantom sat at [0.639, 0.453, 0.030, 0.080] and was detected 63
+ * times in 83 minutes — all 63 at that same box, to three decimals. It still
+ * fired three "person" alerts, because presence was only 42% (it flickers) and
+ * the recurrence rule wanted six hours. Both were measuring the wrong thing.
+ * The evidence was already overwhelming: of every observation of that object,
+ * every single one put it in exactly the same place.
+ *
+ * A person detected sixty times produces sixty slightly different boxes. Only
+ * an object reprojects onto the same pixels every time, and a small box makes
+ * that stricter still — 85% IoU on something 3% of frame wide is a handful of
+ * pixels of tolerance. So: seen enough times, essentially always at the same
+ * spot, over enough minutes that it is not one burst.
+ *
+ * This adds no exposure the constant rule did not already carry. Someone who
+ * stands genuinely motionless for three quarters of an hour is suppressed by
+ * that rule at the thirty minute mark regardless.
+ */
+const RIGID_MIN_SEEN = 40;
+const RIGID_MIN_TIGHT_RATIO = 0.95;
+const RIGID_MIN_AGE_MS = 45 * 60_000;
+/**
  * Overlap required before a track suppresses a DIFFERENT kind at its location.
  *
  * The porch railing on Driveway 2 is the case for this. The detector cannot
@@ -155,7 +178,7 @@ export class SceneryModel {
    * detector only notices when the light suits it and which the presence rule
    * therefore never learned.
    */
-  private qualifies(track: Track, nowMs: number): "constant" | "recurrent" | null {
+  private qualifies(track: Track, nowMs: number): "constant" | "recurrent" | "rigid" | null {
     const age = track.lastMs - track.firstMs;
     const samples = track.seen + track.missed;
     if (
@@ -172,6 +195,14 @@ export class SceneryModel {
       track.tight >= RECURRENT_MIN_TIGHT
     ) {
       return "recurrent";
+    }
+    if (
+      nowMs - track.lastMs < RECURRENT_FORGET_MS &&
+      age >= RIGID_MIN_AGE_MS &&
+      track.seen >= RIGID_MIN_SEEN &&
+      track.tight / track.seen >= RIGID_MIN_TIGHT_RATIO
+    ) {
+      return "rigid";
     }
     return null;
   }
