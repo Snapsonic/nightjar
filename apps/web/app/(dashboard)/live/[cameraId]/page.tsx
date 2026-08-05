@@ -2,9 +2,10 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
-import { CameraCapabilities, Zone } from "@nightjar/shared";
+import { CameraCapabilities, QuietWindow, Zone } from "@nightjar/shared";
 import { CameraNotifications } from "@/components/camera-notifications";
 import { LivePlayer } from "@/components/live-player";
+import { QuietHoursEditor } from "@/components/quiet-hours-editor";
 import { ZoneEditor } from "@/components/zone-editor";
 import { NodeStatusBadge } from "@/components/status-badge";
 import { TimelineHistory } from "@/components/timeline-history";
@@ -35,7 +36,7 @@ export default async function LivePage({
   const supabase = await createClient();
   const { data: camera, error } = await supabase
     .from("cameras")
-    .select("id, node_id, name, enabled, capabilities, zones")
+    .select("id, node_id, name, enabled, capabilities, zones, quiet_hours")
     .eq("id", cameraId)
     .maybeSingle();
 
@@ -92,6 +93,11 @@ export default async function LivePage({
   const parsedZones = z.array(Zone).safeParse(camera.zones ?? []);
   const zones = parsedZones.success ? parsedZones.data : [];
 
+  // Same tolerance as zones: rows written before this column existed, or by an
+  // older node build, parse to "no quiet hours" rather than erroring the page.
+  const parsedQuiet = z.array(QuietWindow).safeParse(camera.quiet_hours ?? []);
+  const quietHours = parsedQuiet.success ? parsedQuiet.data : [];
+
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -140,6 +146,13 @@ export default async function LivePage({
           initialKinds={cameraKinds}
         />
       )}
+
+      <QuietHoursEditor
+        cameraId={camera.id}
+        nodeId={camera.node_id}
+        nodeOnline={online}
+        initialQuietHours={quietHours}
+      />
 
       <TimelineHistory cameraId={camera.id} nodeId={camera.node_id} autoFocus={historyTab} />
     </>

@@ -13,9 +13,11 @@ import {
   type TimelineDaysRequest,
   type TimelineExportRequest,
   type TimelinePreviewRequest,
+  type UpdateQuietHoursRequest,
   type UpdateZonesRequest,
   type WhepOffer,
   type Zone,
+  type QuietWindow,
 } from "@nightjar/shared";
 import { REALTIME_SUBSCRIBE_STATES, type RealtimeChannel } from "@supabase/supabase-js";
 import type { z } from "zod";
@@ -60,6 +62,7 @@ type ReplyMessage = Extract<
       | "timeline_preview_reply"
       | "timeline_export_reply"
       | "update_zones_reply"
+      | "update_quiet_hours_reply"
       | "gdrive_status_reply"
       | "gdrive_connect_reply"
       | "gdrive_toggle_reply"
@@ -77,6 +80,7 @@ type OutgoingRequest =
   | Omit<z.infer<typeof TimelinePreviewRequest>, "requestId">
   | Omit<z.infer<typeof TimelineExportRequest>, "requestId">
   | Omit<z.infer<typeof UpdateZonesRequest>, "requestId">
+  | Omit<z.infer<typeof UpdateQuietHoursRequest>, "requestId">
   | Omit<z.infer<typeof GdriveStatusRequest>, "requestId">
   | Omit<z.infer<typeof GdriveConnectRequest>, "requestId">
   | Omit<z.infer<typeof GdriveToggleRequest>, "requestId">
@@ -278,6 +282,7 @@ class SharedCore {
       message.type === "timeline_preview_request" ||
       message.type === "timeline_export_request" ||
       message.type === "update_zones_request" ||
+      message.type === "update_quiet_hours_request" ||
       message.type === "gdrive_status_request" ||
       message.type === "gdrive_connect_request" ||
       message.type === "gdrive_toggle_request" ||
@@ -547,6 +552,18 @@ export class NodeChannel {
     await this.request(
       { type: "update_zones_request", cameraId, zones },
       ["update_zones_reply"],
+      timeoutMs,
+    );
+  }
+
+  async requestUpdateQuietHours(
+    cameraId: string,
+    quietHours: QuietWindow[],
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<void> {
+    await this.request(
+      { type: "update_quiet_hours_request", cameraId, quietHours },
+      ["update_quiet_hours_reply"],
       timeoutMs,
     );
   }

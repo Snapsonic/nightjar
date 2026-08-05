@@ -35,6 +35,7 @@ type TimelineCoverageMessage = Extract<RealtimeMessage, { type: "timeline_covera
 type TimelineExportMessage = Extract<RealtimeMessage, { type: "timeline_export_request" }>;
 type TimelinePreviewMessage = Extract<RealtimeMessage, { type: "timeline_preview_request" }>;
 type UpdateZonesMessage = Extract<RealtimeMessage, { type: "update_zones_request" }>;
+type UpdateQuietHoursMessage = Extract<RealtimeMessage, { type: "update_quiet_hours_request" }>;
 type GdriveToggleMessage = Extract<RealtimeMessage, { type: "gdrive_toggle_request" }>;
 type DiskInfo = Extract<RealtimeMessage, { type: "status_reply" }>["disk"];
 
@@ -463,6 +464,7 @@ export class CloudLink {
       model: camera.model ?? null,
       capabilities: JSON.parse(JSON.stringify(camera.capabilities)) as Json,
       zones: JSON.parse(JSON.stringify(camera.zones)) as Json,
+      quiet_hours: JSON.parse(JSON.stringify(camera.quietHours)) as Json,
       enabled: camera.enabled,
     }));
     if (rows.length > 0) {
@@ -510,6 +512,9 @@ export class CloudLink {
         break;
       case "update_zones_request":
         await this.replyOrError(message.requestId, () => this.onUpdateZones(message));
+        break;
+      case "update_quiet_hours_request":
+        await this.replyOrError(message.requestId, () => this.onUpdateQuietHours(message));
         break;
       case "gdrive_status_request":
         await this.replyOrError(message.requestId, () =>
@@ -809,6 +814,27 @@ export class CloudLink {
       `zones updated for camera ${message.cameraId} (${message.zones.length} zone(s))`,
     );
     await this.send({ type: "update_zones_reply", requestId: message.requestId, ok: true });
+  }
+
+  /** Replace a camera's quiet windows (already validated by the shared
+   *  QuietWindow schema during RealtimeMessage parsing). Persisting via the
+   *  camera manager triggers the config-change fanout, and the windows ride
+   *  along on the next camera row sync. */
+  private async onUpdateQuietHours(message: UpdateQuietHoursMessage): Promise<void> {
+    this.requireCamera(message.cameraId);
+    const updated = this.deps.cameras.updateCamera(message.cameraId, {
+      quietHours: message.quietHours,
+    });
+    if (!updated) throw new LinkError("camera_not_found", `unknown camera ${message.cameraId}`);
+    this.log.info(
+      `quiet hours updated for camera ${message.cameraId}: ` +
+        (message.quietHours.length === 0
+          ? "none"
+          : message.quietHours
+              .map((w) => `${w.kinds.join("/")} ${w.start}-${w.end}`)
+              .join(", ")),
+    );
+    await this.send({ type: "update_quiet_hours_reply", requestId: message.requestId, ok: true });
   }
 
   /* ---------- Google Drive backup (mirrors /api/backup/gdrive) ---------- */

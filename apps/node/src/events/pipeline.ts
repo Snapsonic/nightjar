@@ -14,7 +14,7 @@ import type { GdriveBackup } from "../backup/gdrive.js";
 import type { CloudLink } from "../cloud/link.js";
 import type { ConfigStore } from "../config/store.js";
 import type { NodeDb } from "../db.js";
-import { go2rtcStreamName } from "@nightjar/shared";
+import { go2rtcStreamName, inQuietWindow } from "@nightjar/shared";
 import type { DetectWorker } from "../detect/worker.js";
 import type { Logger } from "../log.js";
 import type { MotionDetector, MotionEvent } from "../motion/detector.js";
@@ -630,6 +630,20 @@ export class EventPipeline {
   }
 
   private async close(candidate: OpenEvent): Promise<void> {
+    // Quiet hours are enforced here, at the single point every event must pass
+    // through, so one check covers the motion path and the sweep alike. And it
+    // is enforced on the settled KIND, not on the motion that opened the
+    // candidate: silencing "cat" must not silence the person who walked past
+    // the same camera in the same window.
+    const camera = this.deps.store.get().cameras.find((c) => c.id === candidate.cameraId);
+    const quiet = camera?.quietHours ?? [];
+    if (inQuietWindow(quiet, candidate.kind, new Date(candidate.startedAtMs))) {
+      this.deps.log.info(
+        `event ${candidate.id} dropped: ${candidate.kind} is in a quiet window on camera ` +
+          `${candidate.cameraId} — no clip, no upload, no alert (footage is still recorded)`,
+      );
+      return;
+    }
     const endMs = candidate.endedAtMs ?? Date.now();
     const clipStartMs = candidate.startedAtMs - PRE_ROLL_MS;
     const clipEndMs = Math.min(endMs + POST_ROLL_MS, Date.now());

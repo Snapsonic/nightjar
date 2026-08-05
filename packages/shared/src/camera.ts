@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EventKind } from "./events";
 
 export const CameraCapabilities = z.object({
   hasSubstream: z.boolean().default(false),
@@ -40,6 +41,65 @@ export const Zone = z.object({
   mode: z.enum(["include"]).default("include"),
 });
 export type Zone = z.infer<typeof Zone>;
+
+/** Sanity cap on quiet windows per camera (protocol + editor enforce it too). */
+export const MAX_QUIET_WINDOWS_PER_CAMERA = 8;
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * A window of the node's local day during which some kinds raise no event.
+ *
+ * The motivating case is a cat that spends its afternoons on the back deck:
+ * every detection is correct, and none of them is worth a clip, an upload and
+ * a push. Suppression here is total rather than notification-only — the point
+ * is to stop doing the work, not to do it quietly — so continuous recording is
+ * deliberately untouched and the footage is still there to scrub.
+ *
+ * Times are wall-clock on the node and compared against its local time, so a
+ * window means the same thing before and after a daylight-saving change rather
+ * than drifting by an hour. `start` after `end` wraps midnight (22:00-06:00).
+ */
+export const QuietWindow = z.object({
+  /** Kinds silenced in this window. Kinds not listed are unaffected. */
+  kinds: z.array(EventKind).min(1),
+  /** Local "HH:MM", inclusive. */
+  start: z.string().regex(HHMM),
+  /** Local "HH:MM", exclusive. */
+  end: z.string().regex(HHMM),
+});
+export type QuietWindow = z.infer<typeof QuietWindow>;
+
+/** Minutes since local midnight for "HH:MM". */
+function minutesOfDay(hhmm: string): number {
+  const [h, m] = hhmm.split(":");
+  return Number(h) * 60 + Number(m);
+}
+
+/**
+ * Is this kind silenced at this instant?
+ *
+ * Pure and exported so the node, the tests and (later) the UI all agree on
+ * what a window means, midnight wrap included.
+ */
+export function inQuietWindow(
+  windows: readonly QuietWindow[],
+  kind: EventKind,
+  at: Date,
+): boolean {
+  const now = at.getHours() * 60 + at.getMinutes();
+  for (const w of windows) {
+    if (!w.kinds.includes(kind)) continue;
+    const start = minutesOfDay(w.start);
+    const end = minutesOfDay(w.end);
+    // start === end is an empty window, not a whole day: a window you cannot
+    // see the edges of would be an easy way to silence a camera by accident.
+    if (start === end) continue;
+    const inside = start < end ? now >= start && now < end : now >= start || now < end;
+    if (inside) return true;
+  }
+  return false;
+}
 
 /** Sanity cap on zones per camera (protocol + editor enforce it too). */
 export const MAX_ZONES_PER_CAMERA = 16;
@@ -97,6 +157,10 @@ const CameraConfigBase = z.object({
    *  means the whole frame is active. Not a credential — included in
    *  CameraPublic and synced to the cloud so the web UI can edit them. */
   zones: z.array(Zone).max(MAX_ZONES_PER_CAMERA).default([]),
+  /** Quiet windows. Empty (the default, and what legacy configs parse to)
+   *  means always on. Not a credential — included in CameraPublic and synced
+   *  to the cloud so the web UI can edit them. */
+  quietHours: z.array(QuietWindow).max(MAX_QUIET_WINDOWS_PER_CAMERA).default([]),
 });
 
 export const CameraConfig = CameraConfigBase.superRefine((camera, ctx) => {

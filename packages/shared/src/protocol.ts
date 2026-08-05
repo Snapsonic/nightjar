@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { MAX_ZONES_PER_CAMERA, Zone } from "./camera";
+import {
+  MAX_QUIET_WINDOWS_PER_CAMERA,
+  MAX_ZONES_PER_CAMERA,
+  QuietWindow,
+  Zone,
+} from "./camera";
 
 /**
  * Messages exchanged over the per-node Supabase Realtime channel
@@ -157,6 +162,24 @@ export const UpdateZonesReply = z.object({
   ok: z.literal(true),
 });
 
+/* ---------- quiet hours ---------- */
+
+/** Replace a camera's quiet windows (the camera page's schedule editor). The
+ *  node validates with the shared QuietWindow schema, persists via the camera
+ *  manager, and the windows ride along on the next camera row sync. */
+export const UpdateQuietHoursRequest = z.object({
+  type: z.literal("update_quiet_hours_request"),
+  ...base,
+  cameraId: z.string().uuid(),
+  quietHours: z.array(QuietWindow).max(MAX_QUIET_WINDOWS_PER_CAMERA),
+});
+
+export const UpdateQuietHoursReply = z.object({
+  type: z.literal("update_quiet_hours_reply"),
+  ...base,
+  ok: z.literal(true),
+});
+
 /* ---------- Google Drive backup ("bring your own cloud") ---------- */
 
 export const GdriveQuota = z.object({
@@ -278,6 +301,8 @@ export const RealtimeMessage = z.discriminatedUnion("type", [
   TimelineExportReply,
   UpdateZonesRequest,
   UpdateZonesReply,
+  UpdateQuietHoursRequest,
+  UpdateQuietHoursReply,
   GdriveStatusRequest,
   GdriveStatusReply,
   GdriveConnectRequest,

@@ -1,0 +1,27 @@
+-- Per-camera quiet windows: times of day when given kinds raise no event at
+-- all on the node — no event row, no clip, no upload, no alert.
+--
+-- The case that prompted it: a resident cat spends its afternoons on the back
+-- deck and produced 91 of one day's 96 cat events from a single camera. Every
+-- detection was correct. None was worth a clip cut, an upload, a Drive backup
+-- and a push. Notification filtering alone would not have helped, because the
+-- expensive part happens before anyone is notified.
+--
+-- Continuous recording is deliberately untouched, so the footage is still on
+-- the node and still scrubbable from the timeline — what stops is the event
+-- pipeline, not the camera.
+--
+-- Shape mirrors zones: edited in the web UI, sent to the node over the
+-- realtime channel, persisted in node config, and synced back up on the
+-- camera row so the UI can render current state.
+--
+--   [{"kinds": ["cat"], "start": "10:00", "end": "18:00"}]
+--
+-- Times are wall-clock local to the node, so a window means the same thing
+-- either side of a daylight-saving change. start > end wraps midnight.
+--
+-- NOTE: apply this BEFORE deploying node builds that sync the quiet_hours
+-- column — their camera upsert includes it and fails until the column exists
+-- (the same ordering trap as 0008_camera_zones).
+alter table public.cameras
+  add column if not exists quiet_hours jsonb not null default '[]';

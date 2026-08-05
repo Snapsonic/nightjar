@@ -25,6 +25,7 @@ export type Database = {
           name: string
           node_id: string
           zones: Json
+          quiet_hours: Json
         }
         Insert: {
           capabilities?: Json
@@ -36,6 +37,7 @@ export type Database = {
           name: string
           node_id: string
           zones?: Json
+          quiet_hours?: Json
         }
         Update: {
           capabilities?: Json
@@ -47,6 +49,7 @@ export type Database = {
           name?: string
           node_id?: string
           zones?: Json
+          quiet_hours?: Json
         }
         Relationships: [
           {
